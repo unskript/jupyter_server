@@ -14,7 +14,10 @@ BYPASS_MODE = True
 
 LOCK = asyncio.Lock()
 
-cap = '''
+'''
+NbConvertRootHandler::get() returns the capability list of all
+exporters like this: It may be good idea to cache it after the first
+response was sent out.
 {
   "asciidoc": {
     "output_mimetype": "text/asciidoc"
@@ -57,6 +60,8 @@ cap = '''
 
 class NbconvertRootHandler(APIHandler):
     auth_resource = AUTH_RESOURCE
+    cached = False
+    cap = {}
 
     @web.authenticated
     @authorized
@@ -65,8 +70,8 @@ class NbconvertRootHandler(APIHandler):
             from nbconvert.exporters import base
         except ImportError as e:
             raise web.HTTPError(500, "Could not import nbconvert: %s" % e) from e
-        if BYPASS_MODE == True:
-            res = cap
+        if BYPASS_MODE == True & self.cached == True:
+            res = self.cap
             self.finish(res)
         else:
             res = {}
@@ -89,6 +94,10 @@ class NbconvertRootHandler(APIHandler):
             res[exporter_name] = {
                 "output_mimetype": exporter_class.output_mimetype,
             }
+            
+        if self.cached == False:
+            self.cap = json.dumps(res)
+            self.cached = True
 
         self.finish(json.dumps(res))
 
