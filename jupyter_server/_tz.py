@@ -1,4 +1,3 @@
-# encoding: utf-8
 """
 Timezone utilities
 
@@ -6,21 +5,21 @@ Just UTC-awareness right now
 """
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
-from datetime import datetime
-from datetime import timedelta
-from datetime import tzinfo
+from datetime import datetime, timedelta, tzinfo
 
 # constant for zero offset
 ZERO = timedelta(0)
 
 
-class tzUTC(tzinfo):
+class tzUTC(tzinfo):  # noqa
     """tzinfo object for UTC (zero offset)"""
 
     def utcoffset(self, d):
+        """Compute utcoffset."""
         return ZERO
 
     def dst(self, d):
+        """Compute dst."""
         return ZERO
 
 

@@ -3,35 +3,27 @@
 # Distributed under the terms of the Modified BSD License.
 import itertools
 import json
+import os
 import re
 import warnings
 from fnmatch import fnmatch
 
-from nbformat import sign
+from jupyter_client.utils import run_sync
+from jupyter_core.utils import ensure_async
+from jupyter_events import EventLogger
+from nbformat import ValidationError, sign
 from nbformat import validate as validate_nb
-from nbformat import ValidationError
 from nbformat.v4 import new_notebook
-from tornado.web import HTTPError
-from tornado.web import RequestHandler
-from traitlets import Any
-from traitlets import Bool
-from traitlets import default
-from traitlets import Dict
-from traitlets import Instance
-from traitlets import List
-from traitlets import TraitError
-from traitlets import Type
-from traitlets import Unicode
-from traitlets import validate
+from tornado.web import HTTPError, RequestHandler
+from traitlets import Any, Bool, Dict, Instance, List, TraitError, Type, Unicode, default, validate
 from traitlets.config.configurable import LoggingConfigurable
 
-from ...files.handlers import FilesHandler
-from .checkpoints import AsyncCheckpoints
-from .checkpoints import Checkpoints
+from jupyter_server import DEFAULT_EVENTS_SCHEMA_PATH, JUPYTER_SERVER_EVENTS_URI
 from jupyter_server.transutils import _i18n
-from jupyter_server.utils import ensure_async
 from jupyter_server.utils import import_item
 
+from ...files.handlers import FilesHandler
+from .checkpoints import AsyncCheckpoints, Checkpoints
 
 copy_pat = re.compile(r"\-Copy\d*\.")
 
@@ -55,12 +47,60 @@ class ContentsManager(LoggingConfigurable):
 
     """
 
+    event_schema_id = JUPYTER_SERVER_EVENTS_URI + "/contents_service/v1"
+    event_logger = Instance(EventLogger).tag(config=True)
+
+    @default("event_logger")
+    def _default_event_logger(self):
+        if self.parent and hasattr(self.parent, "event_logger"):
+            return self.parent.event_logger
+        else:
+            # If parent does not have an event logger, create one.
+            logger = EventLogger()
+            schema_path = DEFAULT_EVENTS_SCHEMA_PATH / "contents_service" / "v1.yaml"
+            logger.register_event_schema(schema_path)
+            return logger
+
+    def emit(self, data):
+        """Emit event using the core event schema from Jupyter Server's Contents Manager."""
+        self.event_logger.emit(schema_id=self.event_schema_id, data=data)
+
     root_dir = Unicode("/", config=True)
+
+    preferred_dir = Unicode(
+        "",
+        config=True,
+        help=_i18n(
+            "Preferred starting directory to use for notebooks. This is an API path (`/` separated, relative to root dir)"
+        ),
+    )
+
+    @validate("preferred_dir")
+    def _validate_preferred_dir(self, proposal):
+        value = proposal["value"].strip("/")
+        try:
+            import inspect
+
+            if inspect.iscoroutinefunction(self.dir_exists):
+                dir_exists = run_sync(self.dir_exists)(value)
+            else:
+                dir_exists = self.dir_exists(value)
+        except HTTPError as e:
+            raise TraitError(e.log_message) from e
+        if not dir_exists:
+            raise TraitError(_i18n("Preferred directory not found: %r") % value)
+        try:
+            if value != self.parent.preferred_dir:
+                self.parent.preferred_dir = os.path.join(self.root_dir, *value.split("/"))
+        except (AttributeError, TraitError):
+            pass
+        return value
 
     allow_hidden = Bool(False, config=True, help="Allow access to hidden files")
 
     notary = Instance(sign.NotebookNotary)
 
+    @default("notary")
     def _notary_default(self):
         return sign.NotebookNotary(parent=self)
 
@@ -126,8 +166,9 @@ class ContentsManager(LoggingConfigurable):
         if isinstance(value, str):
             value = import_item(self.pre_save_hook)
         if not callable(value):
-            raise TraitError("pre_save_hook must be callable")
-        if self.pre_save_hook is not None:
+            msg = "pre_save_hook must be callable"
+            raise TraitError(msg)
+        if callable(self.pre_save_hook):
             warnings.warn(
                 f"Overriding existing pre_save_hook ({self.pre_save_hook.__name__}) with a new one ({value.__name__}).",
                 stacklevel=2,
@@ -161,8 +202,9 @@ class ContentsManager(LoggingConfigurable):
         if isinstance(value, str):
             value = import_item(value)
         if not callable(value):
-            raise TraitError("post_save_hook must be callable")
-        if self.post_save_hook is not None:
+            msg = "post_save_hook must be callable"
+            raise TraitError(msg)
+        if callable(self.post_save_hook):
             warnings.warn(
                 f"Overriding existing post_save_hook ({self.post_save_hook.__name__}) with a new one ({value.__name__}).",
                 stacklevel=2,
@@ -200,25 +242,30 @@ class ContentsManager(LoggingConfigurable):
             try:
                 self.log.debug("Running post-save hook on %s", os_path)
                 self.post_save_hook(os_path=os_path, model=model, contents_manager=self)
-            except Exception as e:
+            except Exception:
                 self.log.error("Post-save hook failed o-n %s", os_path, exc_info=True)
-                raise HTTPError(500, "Unexpected error while running post hook save: %s" % e) from e
+                msg = "fUnexpected error while running post hook save: {e}"
+                raise HTTPError(500, msg) from None
 
     _pre_save_hooks = List()
     _post_save_hooks = List()
 
     def register_pre_save_hook(self, hook):
+        """Register a pre save hook."""
         if isinstance(hook, str):
             hook = import_item(hook)
         if not callable(hook):
-            raise RuntimeError("hook must be callable")
+            msg = "hook must be callable"
+            raise RuntimeError(msg)
         self._pre_save_hooks.append(hook)
 
     def register_post_save_hook(self, hook):
+        """Register a post save hook."""
         if isinstance(hook, str):
             hook = import_item(hook)
         if not callable(hook):
-            raise RuntimeError("hook must be callable")
+            msg = "hook must be callable"
+            raise RuntimeError(msg)
         self._post_save_hooks.append(hook)
 
     def run_pre_save_hooks(self, model, path, **kwargs):
@@ -270,10 +317,10 @@ class ContentsManager(LoggingConfigurable):
 
     @default("checkpoints_kwargs")
     def _default_checkpoints_kwargs(self):
-        return dict(
-            parent=self,
-            log=self.log,
-        )
+        return {
+            "parent": self,
+            "log": self.log,
+        }
 
     files_handler_class = Type(
         FilesHandler,
@@ -323,7 +370,7 @@ class ContentsManager(LoggingConfigurable):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check
 
         Returns
@@ -338,7 +385,7 @@ class ContentsManager(LoggingConfigurable):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check. This is an API path (`/` separated,
             relative to root dir).
 
@@ -359,7 +406,7 @@ class ContentsManager(LoggingConfigurable):
 
         Parameters
         ----------
-        path : string
+        path : str
             The API path of a file to check for.
 
         Returns
@@ -367,7 +414,7 @@ class ContentsManager(LoggingConfigurable):
         exists : bool
             Whether the file exists.
         """
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     def exists(self, path):
         """Does a file or directory exist at the given path?
@@ -376,7 +423,7 @@ class ContentsManager(LoggingConfigurable):
 
         Parameters
         ----------
-        path : string
+        path : str
             The API path of a file or directory to check for.
 
         Returns
@@ -388,7 +435,7 @@ class ContentsManager(LoggingConfigurable):
 
     def get(self, path, content=True, type=None, format=None):
         """Get a file or directory model."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     def save(self, model, path):
         """
@@ -398,15 +445,15 @@ class ContentsManager(LoggingConfigurable):
         should call self.run_pre_save_hook(model=model, path=path) prior to
         writing any data.
         """
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     def delete_file(self, path):
         """Delete the file or directory at path."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     def rename_file(self, old_path, new_path):
         """Rename a file or directory."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     # ContentsManager API part 2: methods that have useable default
     # implementations, but can be overridden in subclasses.
@@ -418,11 +465,13 @@ class ContentsManager(LoggingConfigurable):
             raise HTTPError(400, "Can't delete root")
         self.delete_file(path)
         self.checkpoints.delete_all_checkpoints(path)
+        self.emit(data={"action": "delete", "path": path})
 
     def rename(self, old_path, new_path):
         """Rename a file and any checkpoints associated with that file."""
         self.rename_file(old_path, new_path)
         self.checkpoints.rename_all_checkpoints(old_path, new_path)
+        self.emit(data={"action": "rename", "path": new_path, "source_path": old_path})
 
     def update(self, model, path):
         """Update the file's path
@@ -438,6 +487,7 @@ class ContentsManager(LoggingConfigurable):
         return model
 
     def info_string(self):
+        """The information string for the manager."""
         return "Serving contents"
 
     def get_kernel_path(self, path, model=None):
@@ -479,13 +529,13 @@ class ContentsManager(LoggingConfigurable):
 
         for i in itertools.count():
             if i:
-                insert_i = "{}{}".format(insert, i)
+                insert_i = f"{insert}{i}"
             else:
                 insert_i = ""
             name = "{basename}{insert}{suffix}".format(
                 basename=basename, insert=insert_i, suffix=suffix
             )
-            if not self.exists("{}/{}".format(path, name)):
+            if not self.exists(f"{path}/{name}"):
                 break
         return name
 
@@ -545,7 +595,7 @@ class ContentsManager(LoggingConfigurable):
             raise HTTPError(400, "Unexpected model type: %r" % model["type"])
 
         name = self.increment_filename(untitled + ext, path, insert=insert)
-        path = "{0}/{1}".format(path, name)
+        path = f"{path}/{name}"
         return self.new(model, path)
 
     def new(self, model=None, path=""):
@@ -586,6 +636,7 @@ class ContentsManager(LoggingConfigurable):
         from_path must be a full path to a file.
         """
         path = from_path.strip("/")
+
         if to_path is not None:
             to_path = to_path.strip("/")
 
@@ -601,17 +652,27 @@ class ContentsManager(LoggingConfigurable):
         if model["type"] == "directory":
             raise HTTPError(400, "Can't copy directories")
 
-        if to_path is None:
+        is_destination_specified = to_path is not None
+        if not is_destination_specified:
             to_path = from_dir
         if self.dir_exists(to_path):
             name = copy_pat.sub(".", from_name)
             to_name = self.increment_filename(name, to_path, insert="-Copy")
-            to_path = "{0}/{1}".format(to_path, to_name)
+            to_path = f"{to_path}/{to_name}"
+        elif is_destination_specified:
+            if "/" in to_path:
+                to_dir, to_name = to_path.rsplit("/", 1)
+                if not self.dir_exists(to_dir):
+                    raise HTTPError(404, "No such parent directory: %s to copy file in" % to_dir)
+        else:
+            raise HTTPError(404, "No such directory: %s" % to_path)
 
         model = self.save(model, to_path)
+        self.emit(data={"action": "copy", "path": to_path, "source_path": from_path})
         return model
 
     def log_info(self):
+        """Log the information string for the manager."""
         self.log.info(self.info_string())
 
     def trust_notebook(self, path):
@@ -619,7 +680,7 @@ class ContentsManager(LoggingConfigurable):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path of a notebook
         """
         model = self.get(path)
@@ -637,7 +698,7 @@ class ContentsManager(LoggingConfigurable):
         ----------
         nb : dict
             The notebook dict
-        path : string
+        path : str
             The notebook's path (for logging)
         """
         if self.notary.check_cells(nb):
@@ -654,7 +715,7 @@ class ContentsManager(LoggingConfigurable):
         ----------
         nb : dict
             The notebook object (in current nbformat)
-        path : string
+        path : str
             The notebook's path (for logging)
         """
         trusted = self.notary.check_signature(nb)
@@ -697,10 +758,10 @@ class AsyncContentsManager(ContentsManager):
 
     @default("checkpoints_kwargs")
     def _default_checkpoints_kwargs(self):
-        return dict(
-            parent=self,
-            log=self.log,
-        )
+        return {
+            "parent": self,
+            "log": self.log,
+        }
 
     # ContentsManager API part 1: methods that must be
     # implemented in subclasses.
@@ -714,7 +775,7 @@ class AsyncContentsManager(ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check
 
         Returns
@@ -729,7 +790,7 @@ class AsyncContentsManager(ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check. This is an API path (`/` separated,
             relative to root dir).
 
@@ -750,7 +811,7 @@ class AsyncContentsManager(ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The API path of a file to check for.
 
         Returns
@@ -758,7 +819,7 @@ class AsyncContentsManager(ContentsManager):
         exists : bool
             Whether the file exists.
         """
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     async def exists(self, path):
         """Does a file or directory exist at the given path?
@@ -767,7 +828,7 @@ class AsyncContentsManager(ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The API path of a file or directory to check for.
 
         Returns
@@ -781,7 +842,7 @@ class AsyncContentsManager(ContentsManager):
 
     async def get(self, path, content=True, type=None, format=None):
         """Get a file or directory model."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     async def save(self, model, path):
         """
@@ -791,15 +852,15 @@ class AsyncContentsManager(ContentsManager):
         should call self.run_pre_save_hook(model=model, path=path) prior to
         writing any data.
         """
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     async def delete_file(self, path):
         """Delete the file or directory at path."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     async def rename_file(self, old_path, new_path):
         """Rename a file or directory."""
-        raise NotImplementedError("must be implemented in a subclass")
+        raise NotImplementedError
 
     # ContentsManager API part 2: methods that have useable default
     # implementations, but can be overridden in subclasses.
@@ -812,11 +873,13 @@ class AsyncContentsManager(ContentsManager):
 
         await self.delete_file(path)
         await self.checkpoints.delete_all_checkpoints(path)
+        self.emit(data={"action": "delete", "path": path})
 
     async def rename(self, old_path, new_path):
         """Rename a file and any checkpoints associated with that file."""
         await self.rename_file(old_path, new_path)
         await self.checkpoints.rename_all_checkpoints(old_path, new_path)
+        self.emit(data={"action": "rename", "path": new_path, "source_path": old_path})
 
     async def update(self, model, path):
         """Update the file's path
@@ -858,13 +921,13 @@ class AsyncContentsManager(ContentsManager):
 
         for i in itertools.count():
             if i:
-                insert_i = "{}{}".format(insert, i)
+                insert_i = f"{insert}{i}"
             else:
                 insert_i = ""
             name = "{basename}{insert}{suffix}".format(
                 basename=basename, insert=insert_i, suffix=suffix
             )
-            file_exists = await ensure_async(self.exists("{}/{}".format(path, name)))
+            file_exists = await ensure_async(self.exists(f"{path}/{name}"))
             if not file_exists:
                 break
         return name
@@ -905,7 +968,7 @@ class AsyncContentsManager(ContentsManager):
             raise HTTPError(400, "Unexpected model type: %r" % model["type"])
 
         name = await self.increment_filename(untitled + ext, path, insert=insert)
-        path = "{0}/{1}".format(path, name)
+        path = f"{path}/{name}"
         return await self.new(model, path)
 
     async def new(self, model=None, path=""):
@@ -946,6 +1009,7 @@ class AsyncContentsManager(ContentsManager):
         from_path must be a full path to a file.
         """
         path = from_path.strip("/")
+
         if to_path is not None:
             to_path = to_path.strip("/")
 
@@ -960,14 +1024,24 @@ class AsyncContentsManager(ContentsManager):
         model.pop("name", None)
         if model["type"] == "directory":
             raise HTTPError(400, "Can't copy directories")
-        if to_path is None:
+
+        is_destination_specified = to_path is not None
+        if not is_destination_specified:
             to_path = from_dir
         if await ensure_async(self.dir_exists(to_path)):
             name = copy_pat.sub(".", from_name)
             to_name = await self.increment_filename(name, to_path, insert="-Copy")
-            to_path = "{0}/{1}".format(to_path, to_name)
+            to_path = f"{to_path}/{to_name}"
+        elif is_destination_specified:
+            if "/" in to_path:
+                to_dir, to_name = to_path.rsplit("/", 1)
+                if not await ensure_async(self.dir_exists(to_dir)):
+                    raise HTTPError(404, "No such parent directory: %s to copy file in" % to_dir)
+        else:
+            raise HTTPError(404, "No such directory: %s" % to_path)
 
         model = await self.save(model, to_path)
+        self.emit(data={"action": "copy", "path": to_path, "source_path": from_path})
         return model
 
     async def trust_notebook(self, path):
@@ -975,7 +1049,7 @@ class AsyncContentsManager(ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path of a notebook
         """
         model = await self.get(path)
@@ -996,7 +1070,9 @@ class AsyncContentsManager(ContentsManager):
         await self.checkpoints.restore_checkpoint(self, checkpoint_id, path)
 
     async def list_checkpoints(self, path):
+        """List the checkpoints for a path."""
         return await self.checkpoints.list_checkpoints(path)
 
     async def delete_checkpoint(self, checkpoint_id, path):
+        """Delete a checkpoint for a path by id."""
         return await self.checkpoints.delete_checkpoint(checkpoint_id, path)

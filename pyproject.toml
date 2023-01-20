@@ -1,44 +1,284 @@
 [build-system]
-requires = ["jupyter_packaging~=0.9"]
-build-backend = "jupyter_packaging.build_api"
+requires = ["hatchling >=1.11"]
+build-backend = "hatchling.build"
 
-[tool.jupyter-packaging.builder]
-factory = "jupyter_packaging.npm_builder"
+[project]
+name = "jupyter_server"
+dynamic = ["version"]
+readme = "README.md"
+license = { file = "COPYING.md" }
+description = "The backend—i.e. core services, APIs, and REST endpoints—to Jupyter web applications."
+authors = [{name = "Jupyter Development Team", email = "jupyter@googlegroups.com"}]
+keywords = ["ipython", "jupyter"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "anyio>=3.1.0,<4",
+    "argon2-cffi",
+    "jinja2",
+    "jupyter_client>=7.4.4",
+    "jupyter_core>=4.12,!=5.0.*",
+    "jupyter_server_terminals",
+    "nbconvert>=6.4.4",
+    "nbformat>=5.3.0",
+    "packaging",
+    "prometheus_client",
+    "pywinpty;os_name=='nt'",
+    "pyzmq>=24",
+    "Send2Trash",
+    "terminado>=0.8.3",
+    "tornado>=6.2.0",
+    "traitlets>=5.6.0",
+    "websocket-client",
+    "jupyter_events>=0.4.0"
+]
 
-[tool.check-manifest]
-ignore = ["tbump.toml", ".*", "*.yml", "package-lock.json", "bootstrap*", "conftest.py"]
+[project.urls]
+Homepage = "https://jupyter-server.readthedocs.io"
+Documentation = "https://jupyter-server.readthedocs.io"
+Funding = "https://numfocus.org/donate"
+Source = "https://github.com/jupyter-server/jupyter_server"
+Tracker = "https://github.com/jupyter-server/jupyter_server/issues"
+
+[project.optional-dependencies]
+test = [
+    "ipykernel",
+    "pytest-console-scripts",
+    "pytest-timeout",
+    "pytest-jupyter[server]>=0.4",
+    "pytest>=7.0",
+    "requests",
+    "pre-commit"
+]
+docs = [
+    # needed because m2r uses deprecated APIs
+    # m2r is depended on by sphinxcontrib-openapi
+    "docutils<0.20",
+    "ipykernel",
+    "jinja2",
+    "jupyter_client",
+    "jupyter_server",
+    "mistune<1.0.0",
+    "myst-parser",
+    "nbformat",
+    "prometheus_client",
+    "pydata_sphinx_theme",
+    "Send2Trash",
+    "sphinxcontrib-openapi",
+    "sphinxcontrib_github_alt",
+    "sphinxcontrib-spelling",
+    "sphinx-autodoc-typehints",
+    "sphinxemoji",
+    "tornado",
+]
+
+[project.scripts]
+jupyter-server = "jupyter_server.serverapp:main"
+
+[tool.hatch.envs.docs]
+features = ["docs"]
+[tool.hatch.envs.docs.scripts]
+build = "make -C docs html SPHINXOPTS='-W'"
+api = "sphinx-apidoc -o docs/source/api -f -E jupyter_server */terminal jupyter_server/pytest_plugin.py"
+
+[tool.hatch.envs.test]
+features = ["test"]
+[tool.hatch.envs.test.scripts]
+test = "python -m pytest -vv {args}"
+nowarn = "test -W default {args}"
+
+[tool.hatch.envs.typing]
+features = ["test"]
+dependencies = [ "mypy>=0.990" ]
+[tool.hatch.envs.typing.scripts]
+test = "mypy --install-types --non-interactive {args:.}"
+
+[tool.hatch.envs.cov]
+features = ["test"]
+dependencies = ["coverage[toml]", "pytest-cov"]
+[tool.hatch.envs.cov.scripts]
+test = "python -m pytest -vv --cov jupyter_server --cov-branch --cov-report term-missing:skip-covered {args}"
+nowarn = "test -W default {args}"
+integration = "test --integration_tests=true {args}"
+
+[tool.hatch.envs.lint]
+detached = true
+dependencies = [
+  "black[jupyter]==22.12.0",
+  "mdformat>0.7",
+  "ruff==0.0.206",
+]
+[tool.hatch.envs.lint.scripts]
+style = [
+  "ruff {args:.}",
+  "black --check --diff {args:.}",
+  "mdformat --check {args:docs/source *.md}"
+]
+fmt = [
+  "black {args:.}",
+  "ruff --fix {args:.}",
+  "mdformat {args:docs/source *.md}"
+]
+
+[tool.hatch.version]
+path = "jupyter_server/_version.py"
+validate-bump = false
+
+[tool.hatch.build]
+artifacts = ["jupyter_server/static/style"]
+
+[tool.hatch.build.hooks.jupyter-builder]
+dependencies = ["hatch-jupyter-builder>=0.8.1"]
+build-function = "hatch_jupyter_builder.npm_builder"
+ensured-targets = [
+  "jupyter_server/static/style/bootstrap.min.css",
+  "jupyter_server/static/style/bootstrap-theme.min.css"
+]
+skip-if-exists = ["jupyter_server/static/style/bootstrap.min.css"]
+install-pre-commit-hook = true
+optional-editable-build = true
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+select = [
+  "A", "B", "C", "E", "EM", "F", "FBT", "I", "N", "Q", "RUF", "S", "T",
+  "UP", "W", "YTT",
+]
+ignore = [
+  # Allow non-abstract empty methods in abstract base classes
+  "B027",
+  # Ignore McCabe complexity
+  "C901",
+  # Allow boolean positional values in function calls, like `dict.get(... True)`
+  "FBT003",
+  # Use of `assert` detected
+  "S101",
+  # Line too long
+  "E501",
+  # Relative imports are banned
+  "TID252",
+  # Boolean ... in function definition
+  "FBT001",
+  "FBT002",
+  # Module level import not at top of file
+  "E402",
+  # A001/A002/A003 .. is shadowing a python builtin
+  "A001",
+  "A002",
+  "A003",
+  # Possible hardcoded password
+  "S105",
+  "S106",
+  # Variable `xxx` in function should be lowercase
+  "N806",
+  # Exception name `KernelSessionRecordConflict` should be named with an Error suffix
+  "N818",
+]
+unfixable = [
+  # Don't touch print statements
+  "T201",
+  # Don't touch unused imports
+  "F401",
+  # Don't touch noqa lines
+  "RUF100",
+]
+
+[tool.ruff.per-file-ignores]
+# B011 Do not call assert False since python -O removes these calls
+# F841 local variable 'foo' is assigned to but never used
+# C408 Unnecessary `dict` call
+# E402 Module level import not at top of file
+# T201 `print` found
+# EM101 Exception must not use a string literal
+"tests/*" = ["B011", "F841", "C408", "E402", "T201", "EM101", "EM102", "EM103"]
+# Ignore flake 8 errors from shimmed imports
+"jupyter_server/base/zmqhandlers.py" = ["F401"]
+# F821 Undefined name `c`
+"**/*_config.py" = ["F821"]
+# F401 `jupyter_server_terminals.TerminalAPIHandler` imported but unused
+"jupyter_server/terminal/api_handlers.py" = ["F401"]
 
 [tool.pytest.ini_options]
-addopts = "--doctest-modules"
+addopts = "-raXs --durations 10 --color=yes --doctest-modules"
 testpaths = [
     "tests/"
 ]
-timeout = 300
+timeout = 100
 # Restore this setting to debug failures
-# timeout_method = "thread"
+timeout_method = "thread"
+filterwarnings = [
+  "error",
+  "ignore:Passing a schema to Validator.iter_errors:DeprecationWarning",
+  "ignore:run_pre_save_hook is deprecated:DeprecationWarning",
+  "always:unclosed <socket.socket:ResourceWarning",
+  "module:Jupyter is migrating its paths to use standard platformdirs:DeprecationWarning",
+  "ignore:jupyter_server.base.zmqhandlers module is deprecated in Jupyter Server 2.0:DeprecationWarning",
+]
 
-[tool.jupyter-releaser]
-skip = ["check-links"]
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "if self.debug:",
+  "if settings.DEBUG",
+  "if TYPE_CHECKING:",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if 0:",
+  "if __name__ == .__main__.:",
+  "class .*\bProtocol\\):",
+"@(abc\\.)?abstractmethod",
+]
 
-[tool.tbump.version]
-current = "1.15.7.dev0"
-regex = '''
-  (?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)
-  ((?P<channel>a|b|rc|.dev)(?P<release>\d+))?
-'''
+[tool.jupyter-releaser.hooks]
+before-build-python = ["npm install", "npm run build"]
 
-[tool.tbump.git]
-message_template = "Bump to {new_version}"
-tag_template = "v{new_version}"
+[tool.jupyter-releaser.options]
+pydist_resource_paths = ["jupyter_server/static/style/bootstrap.min.css", "jupyter_server/static/style/bootstrap-theme.min.css"]
+post-version-spec = "dev"
 
-[[tool.tbump.file]]
-src = "jupyter_server/_version.py"
-version_template = '({major}, {minor}, {patch}, "{channel}", "{release}")'
+[tool.mypy]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+pretty = true
+show_error_context = true
+show_error_codes = true
+strict_equality = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+explicit_package_bases = true
+namespace_packages = true
 
-[[tool.tbump.field]]
-name = "channel"
-default = ""
+[tool.interrogate]
+ignore-init-module=true
+ignore-private=true
+ignore-semiprivate=true
+ignore-property-decorators=true
+ignore-nested-functions=true
+ignore-nested-classes=true
+fail-under=95
+exclude = ["docs", "test"]
 
-[[tool.tbump.field]]
-name = "release"
-default = ""
+[tool.check-wheel-contents]
+ignore = ["W002"]

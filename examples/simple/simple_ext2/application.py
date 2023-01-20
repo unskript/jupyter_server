@@ -1,19 +1,18 @@
+"""A simple Jupyter Server extension example."""
 import os
 
 from traitlets import Unicode
 
-from .handlers import ErrorHandler
-from .handlers import IndexHandler
-from .handlers import ParameterHandler
-from .handlers import TemplateHandler
-from jupyter_server.extension.application import ExtensionApp
-from jupyter_server.extension.application import ExtensionAppJinjaMixin
+from jupyter_server.extension.application import ExtensionApp, ExtensionAppJinjaMixin
+
+from .handlers import ErrorHandler, IndexHandler, ParameterHandler, TemplateHandler
 
 DEFAULT_STATIC_FILES_PATH = os.path.join(os.path.dirname(__file__), "static")
 DEFAULT_TEMPLATE_FILES_PATH = os.path.join(os.path.dirname(__file__), "templates")
 
 
 class SimpleApp2(ExtensionAppJinjaMixin, ExtensionApp):
+    """A simple application."""
 
     # The name of the extension.
     name = "simple_ext2"
@@ -30,9 +29,10 @@ class SimpleApp2(ExtensionAppJinjaMixin, ExtensionApp):
     # Local path to templates directory.
     template_paths = [DEFAULT_TEMPLATE_FILES_PATH]
 
-    configD = Unicode("", config=True, help="Config D example.")
+    configD = Unicode("", config=True, help="Config D example.")  # noqa
 
     def initialize_handlers(self):
+        """Initialize handlers."""
         self.handlers.extend(
             [
                 (r"/simple_ext2/params/(.+)$", ParameterHandler),
@@ -43,7 +43,8 @@ class SimpleApp2(ExtensionAppJinjaMixin, ExtensionApp):
         )
 
     def initialize_settings(self):
-        self.log.info("Config {}".format(self.config))
+        """Initialize settings."""
+        self.log.info(f"Config {self.config}")
 
 
 # -----------------------------------------------------------------------------

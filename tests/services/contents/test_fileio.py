@@ -1,12 +1,21 @@
-import io
+import json
+import logging
 import os
 import stat
 import sys
 
 import pytest
+from nbformat import validate
+from nbformat.v4 import new_notebook
+from tornado.web import HTTPError
 
-from jupyter_server.services.contents.fileio import atomic_writing
-
+from jupyter_server.services.contents.fileio import (
+    AsyncFileManagerMixin,
+    FileManagerMixin,
+    atomic_writing,
+    path_to_intermediate,
+    path_to_invalid,
+)
 
 umask = 0
 
@@ -37,13 +46,13 @@ def test_atomic_writing(tmp_path):
             f.write("Failing write")
             raise CustomExc
 
-    with io.open(str(f1), "r") as f:
+    with open(str(f1)) as f:
         assert f.read() == "Before"
 
     with atomic_writing(str(f1)) as f:
         f.write("Overwritten")
 
-    with io.open(str(f1), "r") as f:
+    with open(str(f1)) as f:
         assert f.read() == "Overwritten"
 
     if os.name != "nt":
@@ -55,7 +64,7 @@ def test_atomic_writing(tmp_path):
         with atomic_writing(str(f2)) as f:
             f.write("written from symlink")
 
-        with io.open(str(f1), "r") as f:
+        with open(str(f1)) as f:
             assert f.read() == "written from symlink"
 
 
@@ -96,23 +105,23 @@ def test_atomic_writing_newlines(tmp_path):
     crlf = lf.replace("\n", "\r\n")
 
     # test default
-    with io.open(path, "w") as f:
+    with open(path, "w") as f:
         f.write(lf)
-    with io.open(path, "r", newline="") as f:
+    with open(path, newline="") as f:
         read = f.read()
     assert read == plat
 
     # test newline=LF
-    with io.open(path, "w", newline="\n") as f:
+    with open(path, "w", newline="\n") as f:
         f.write(lf)
-    with io.open(path, "r", newline="") as f:
+    with open(path, newline="") as f:
         read = f.read()
     assert read == lf
 
     # test newline=CRLF
     with atomic_writing(str(path), newline="\r\n") as f:
         f.write(lf)
-    with io.open(path, "r", newline="") as f:
+    with open(path, newline="") as f:
         read = f.read()
     assert read == crlf
 
@@ -120,6 +129,54 @@ def test_atomic_writing_newlines(tmp_path):
     text = "crlf\r\ncr\rlf\n"
     with atomic_writing(str(path), newline="") as f:
         f.write(text)
-    with io.open(path, "r", newline="") as f:
+    with open(path, newline="") as f:
         read = f.read()
     assert read == text
+
+
+def test_path_to_invalid(tmpdir):
+    assert path_to_invalid(tmpdir) == str(tmpdir) + ".invalid"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="test fails on Windows")
+def test_file_manager_mixin(tmpdir):
+    mixin = FileManagerMixin()
+    mixin.log = logging.getLogger()  # type:ignore
+    bad_content = tmpdir / "bad_content.ipynb"
+    bad_content.write_text("{}", "utf8")
+    with pytest.raises(HTTPError):
+        mixin._read_notebook(bad_content)
+    other = path_to_intermediate(bad_content)
+    with open(other, "w") as fid:
+        json.dump(new_notebook(), fid)
+    mixin.use_atomic_writing = True
+    nb = mixin._read_notebook(bad_content)
+    validate(nb)
+
+    with pytest.raises(HTTPError):
+        mixin._read_file(tmpdir, "text")
+
+    with pytest.raises(HTTPError):
+        mixin._save_file(tmpdir / "foo", "foo", "bar")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="test fails on Windows")
+async def test_async_file_manager_mixin(tmpdir):
+    mixin = AsyncFileManagerMixin()
+    mixin.log = logging.getLogger()  # type:ignore
+    bad_content = tmpdir / "bad_content.ipynb"
+    bad_content.write_text("{}", "utf8")
+    with pytest.raises(HTTPError):
+        await mixin._read_notebook(bad_content)
+    other = path_to_intermediate(bad_content)
+    with open(other, "w") as fid:
+        json.dump(new_notebook(), fid)
+    mixin.use_atomic_writing = True
+    nb = await mixin._read_notebook(bad_content)
+    validate(nb)
+
+    with pytest.raises(HTTPError):
+        await mixin._read_file(tmpdir, "text")
+
+    with pytest.raises(HTTPError):
+        await mixin._save_file(tmpdir / "foo", "foo", "bar")

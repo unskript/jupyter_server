@@ -35,6 +35,9 @@ config.rst
 # copied changelog file
 docs/source/other/changelog.md
 
+# full config is generated on demand
+docs/source/other/full-config.rst
+
 # jetbrains ide stuff
 *.iml
 .idea/
@@ -44,3 +47,6 @@ docs/source/other/changelog.md
 .history
 .vscode/*
 !.vscode/*.template
+
+# Compiled static file in example.
+examples/simple/simple_ext1/static/bundle.js

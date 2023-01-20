@@ -1,24 +1,13 @@
+"""The extension manager."""
 import importlib
-import sys
-import traceback
 
 from tornado.gen import multi
-from traitlets import Any
-from traitlets import Bool
-from traitlets import default
-from traitlets import Dict
-from traitlets import HasTraits
-from traitlets import Instance
-from traitlets import observe
-from traitlets import Unicode
+from traitlets import Any, Bool, Dict, HasTraits, Instance, List, Unicode, default, observe
 from traitlets import validate as validate_trait
 from traitlets.config import LoggingConfigurable
 
 from .config import ExtensionConfigManager
-from .utils import ExtensionMetadataError
-from .utils import ExtensionModuleNotFound
-from .utils import get_loader
-from .utils import get_metadata
+from .utils import ExtensionMetadataError, ExtensionModuleNotFound, get_loader, get_metadata
 
 
 class ExtensionPoint(HasTraits):
@@ -33,22 +22,23 @@ class ExtensionPoint(HasTraits):
 
     @validate_trait("metadata")
     def _valid_metadata(self, proposed):
+        """Validate metadata."""
         metadata = proposed["value"]
         # Verify that the metadata has a "name" key.
         try:
             self._module_name = metadata["module"]
         except KeyError:
-            raise ExtensionMetadataError(
-                "There is no 'module' key in the extension's metadata packet."
-            )
+            msg = "There is no 'module' key in the extension's metadata packet."
+            raise ExtensionMetadataError(msg) from None
 
         try:
             self._module = importlib.import_module(self._module_name)
         except ImportError:
-            raise ExtensionModuleNotFound(
-                "The submodule '{}' could not be found. Are you "
-                "sure the extension is installed?".format(self._module_name)
+            msg = (
+                f"The submodule '{self._module_name}' could not be found. Are you "
+                "sure the extension is installed?"
             )
+            raise ExtensionModuleNotFound(msg) from None
         # If the metadata includes an ExtensionApp, create an instance.
         if "app" in metadata:
             self._app = metadata["app"]()
@@ -104,6 +94,7 @@ class ExtensionPoint(HasTraits):
         return self._module
 
     def _get_linker(self):
+        """Get a linker."""
         if self.app:
             linker = self.app._link_jupyter_server_extension
         else:
@@ -117,6 +108,7 @@ class ExtensionPoint(HasTraits):
         return linker
 
     def _get_loader(self):
+        """Get a loader."""
         loc = self.app
         if not loc:
             loc = self.module
@@ -155,7 +147,7 @@ class ExtensionPoint(HasTraits):
         return loader(serverapp)
 
 
-class ExtensionPackage(HasTraits):
+class ExtensionPackage(LoggingConfigurable):
     """An API for interfacing with a Jupyter Server extension package.
 
     Usage:
@@ -165,51 +157,50 @@ class ExtensionPackage(HasTraits):
     """
 
     name = Unicode(help="Name of the an importable Python package.")
-    enabled = Bool(False).tag(config=True)
+    enabled = Bool(False, help="Whether the extension package is enabled.")
 
-    def __init__(self, *args, **kwargs):
-        # Store extension points that have been linked.
-        self._linked_points = {}
-        super().__init__(*args, **kwargs)
+    _linked_points = Dict()
+    extension_points = Dict()
+    module = Any(allow_none=True, help="The module for this extension package. None if not enabled")
+    metadata = List(Dict(), help="Extension metadata loaded from the extension package.")
+    version = Unicode(
+        help="""
+            The version of this extension package, if it can be found.
+            Otherwise, an empty string.
+            """,
+    )
 
-    _linked_points = {}
+    @default("version")
+    def _load_version(self):
+        if not self.enabled:
+            return ""
+        return getattr(self.module, "__version__", "")
 
-    @validate_trait("name")
-    def _validate_name(self, proposed):
-        name = proposed["value"]
-        self._extension_points = {}
+    def __init__(self, **kwargs):
+        """Initialize an extension package."""
+        super().__init__(**kwargs)
+        if self.enabled:
+            self._load_metadata()
+
+    def _load_metadata(self):
+        """Import package and load metadata
+
+        Only used if extension package is enabled
+        """
+        name = self.name
         try:
-            self._module, self._metadata = get_metadata(name)
-        except ImportError:
-            raise ExtensionModuleNotFound(
-                "The module '{name}' could not be found. Are you "
-                "sure the extension is installed?".format(name=name)
+            self.module, self.metadata = get_metadata(name, logger=self.log)
+        except ImportError as e:
+            msg = (
+                f"The module '{name}' could not be found ({e}). Are you "
+                "sure the extension is installed?"
             )
+            raise ExtensionModuleNotFound(msg) from None
         # Create extension point interfaces for each extension path.
-        for m in self._metadata:
+        for m in self.metadata:
             point = ExtensionPoint(metadata=m)
-            self._extension_points[point.name] = point
+            self.extension_points[point.name] = point
         return name
-
-    @property
-    def module(self):
-        """Extension metadata loaded from the extension package."""
-        return self._module
-
-    @property
-    def version(self):
-        """Get the version of this package, if it's given. Otherwise, return an empty string"""
-        return getattr(self._module, "__version__", "")
-
-    @property
-    def metadata(self):
-        """Extension metadata loaded from the extension package."""
-        return self._metadata
-
-    @property
-    def extension_points(self):
-        """A dictionary of extension points."""
-        return self._extension_points
 
     def validate(self):
         """Validate all extension points in this package."""
@@ -219,20 +210,24 @@ class ExtensionPackage(HasTraits):
         return True
 
     def link_point(self, point_name, serverapp):
+        """Link an extension point."""
         linked = self._linked_points.get(point_name, False)
         if not linked:
             point = self.extension_points[point_name]
             point.link(serverapp)
 
     def load_point(self, point_name, serverapp):
+        """Load an extension point."""
         point = self.extension_points[point_name]
         return point.load(serverapp)
 
     def link_all_points(self, serverapp):
+        """Link all extension points."""
         for point_name in self.extension_points:
             self.link_point(point_name, serverapp)
 
     def load_all_points(self, serverapp):
+        """Load all extension points."""
         return [self.load_point(point_name, serverapp) for point_name in self.extension_points]
 
 
@@ -329,12 +324,19 @@ class ExtensionManager(LoggingConfigurable):
             return True
         # Raise a warning if the extension cannot be loaded.
         except Exception as e:
-            if self.serverapp.reraise_server_extension_failures:
+            if self.serverapp and self.serverapp.reraise_server_extension_failures:
                 raise
-            self.log.warning(e)
+            self.log.warning(
+                "%s | error adding extension (enabled: %s): %s",
+                extension_name,
+                enabled,
+                e,
+                exc_info=True,
+            )
         return False
 
     def link_extension(self, name):
+        """Link an extension by name."""
         linked = self.linked_extensions.get(name, False)
         extension = self.extensions[name]
         if not linked and extension.enabled:
@@ -342,36 +344,33 @@ class ExtensionManager(LoggingConfigurable):
                 # Link extension and store links
                 extension.link_all_points(self.serverapp)
                 self.linked_extensions[name] = True
-                self.log.info("{name} | extension was successfully linked.".format(name=name))
+                self.log.info("%s | extension was successfully linked.", name)
             except Exception as e:
-                if self.serverapp.reraise_server_extension_failures:
+                if self.serverapp and self.serverapp.reraise_server_extension_failures:
                     raise
-                self.log.warning(e)
+                self.log.warning("%s | error linking extension: %s", name, e, exc_info=True)
 
     def load_extension(self, name):
+        """Load an extension by name."""
         extension = self.extensions.get(name)
 
         if extension.enabled:
             try:
                 extension.load_all_points(self.serverapp)
             except Exception as e:
-                if self.serverapp.reraise_server_extension_failures:
+                if self.serverapp and self.serverapp.reraise_server_extension_failures:
                     raise
-                self.log.debug("".join(traceback.format_exception(*sys.exc_info())))
-                self.log.warning(
-                    "{name} | extension failed loading with message: {error}".format(
-                        name=name, error=str(e)
-                    )
-                )
+                self.log.warning("%s | extension failed loading with message: %s", name, e)
+                self.log.exception("%s | stack trace", name)
             else:
-                self.log.info("{name} | extension was successfully loaded.".format(name=name))
+                self.log.info("%s | extension was successfully loaded.", name)
 
     async def stop_extension(self, name, apps):
         """Call the shutdown hooks in the specified apps."""
         for app in apps:
-            self.log.debug('{} | extension app "{}" stopping'.format(name, app.name))
+            self.log.debug("%s | extension app %r stopping", name, app.name)
             await app.stop_extension()
-            self.log.debug('{} | extension app "{}" stopped'.format(name, app.name))
+            self.log.debug("%s | extension app %r stopped", name, app.name)
 
     def link_all_extensions(self):
         """Link all enabled extensions
@@ -399,3 +398,10 @@ class ExtensionManager(LoggingConfigurable):
                 for name, apps in sorted(dict(self.extension_apps).items())
             ]
         )
+
+    def any_activity(self):
+        """Check for any activity currently happening across all extension applications."""
+        for _, apps in sorted(dict(self.extension_apps).items()):
+            for app in apps:
+                if app.current_activity():
+                    return True

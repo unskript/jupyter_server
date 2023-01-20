@@ -11,20 +11,27 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.7", "3.8", "3.9", "3.10", "pypy-3.7"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "pypy-3.8"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: Base Setup
         uses: jupyterlab/maintainer-tools/.github/actions/base-setup@v1
-      - name: Install the Python dependencies
-        run: |
-          pip install -e ".[test]"
-          pip install pytest-github-actions-annotate-failures
-      - name: List installed packages
-        run: |
-          pip freeze
-          pip check
       - name: Run the tests
         run: |
-          pytest -vv --integration_tests=true tests
+          hatch run cov:integration
+      - name: Coverage
+        run: |
+          pip install codecov coverage[toml]
+          codecov
+
+  integration_check: # This job does nothing and is only used for the branch protection
+    if: always()
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

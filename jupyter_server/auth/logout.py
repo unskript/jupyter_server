@@ -6,8 +6,11 @@ from ..base.handlers import JupyterHandler
 
 
 class LogoutHandler(JupyterHandler):
+    """An auth logout handler."""
+
     def get(self):
-        self.clear_login_cookie()
+        """Handle a logout."""
+        self.identity_provider.clear_login_cookie(self)
         if self.login_available:
             message = {"info": "Successfully logged out."}
         else:

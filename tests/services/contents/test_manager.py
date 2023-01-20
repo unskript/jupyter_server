@@ -2,21 +2,22 @@ import os
 import sys
 import time
 from itertools import combinations
-from typing import Dict
-from typing import Optional
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
-from nbformat import v4 as nbformat
+from jupyter_core.utils import ensure_async
 from nbformat import ValidationError
+from nbformat import v4 as nbformat
 from tornado.web import HTTPError
 from traitlets import TraitError
 
+from jupyter_server.services.contents.filemanager import (
+    AsyncFileContentsManager,
+    FileContentsManager,
+)
+
 from ...utils import expected_http_error
-from jupyter_server.services.contents.filemanager import AsyncFileContentsManager
-from jupyter_server.services.contents.filemanager import FileContentsManager
-from jupyter_server.utils import ensure_async
 
 
 @pytest.fixture(
@@ -76,7 +77,7 @@ def add_invalid_cell(notebook):
 
 
 async def prepare_notebook(
-    jp_contents_manager, make_invalid: Optional[bool] = False
+    jp_contents_manager: FileContentsManager, make_invalid: Optional[bool] = False
 ) -> Tuple[Dict, str]:
     cm = jp_contents_manager
     model = await ensure_async(cm.new_untitled(type="notebook"))
@@ -190,7 +191,7 @@ async def test_bad_symlink(jp_file_contents_manager_class, tmp_path):
     file_model = await ensure_async(cm.new_untitled(path=path, ext=".txt"))
 
     # create a broken symlink
-    symlink(cm, "target", "%s/%s" % (path, "bad symlink"))
+    symlink(cm, "target", "{}/{}".format(path, "bad symlink"))
     model = await ensure_async(cm.get(path))
 
     contents = {content["name"]: content for content in model["content"]}
@@ -210,7 +211,7 @@ async def test_recursive_symlink(jp_file_contents_manager_class, tmp_path):
     file_model = await ensure_async(cm.new_untitled(path=path, ext=".txt"))
 
     # create recursive symlink
-    symlink(cm, "%s/%s" % (path, "recursive"), "%s/%s" % (path, "recursive"))
+    symlink(cm, "{}/{}".format(path, "recursive"), "{}/{}".format(path, "recursive"))
     model = await ensure_async(cm.get(path))
 
     contents = {content["name"]: content for content in model["content"]}
@@ -225,7 +226,7 @@ async def test_good_symlink(jp_file_contents_manager_class, tmp_path):
     cm = jp_file_contents_manager_class(root_dir=td)
     parent = "test good symlink"
     name = "good symlink"
-    path = "{0}/{1}".format(parent, name)
+    path = f"{parent}/{name}"
     _make_dir(cm, parent)
 
     file_model = await ensure_async(cm.new(path=parent + "/zfoo.txt"))
@@ -257,6 +258,149 @@ async def test_403(jp_file_contents_manager_class, tmp_path):
             f.write("don't care")
     except HTTPError as e:
         assert e.status_code == 403
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Can't test hidden files on Windows")
+async def test_400(jp_file_contents_manager_class, tmp_path):
+    # Test Delete behavior
+    # Test delete of file in hidden directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = ".hidden"
+    file_in_hidden_path = os.path.join(hidden_dir, "visible.txt")
+    _make_dir(cm, hidden_dir)
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.delete_file(file_in_hidden_path))
+    assert excinfo.value.status_code == 400
+
+    # Test delete hidden file in visible directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = "visible"
+    file_in_hidden_path = os.path.join(hidden_dir, ".hidden.txt")
+    _make_dir(cm, hidden_dir)
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.delete_file(file_in_hidden_path))
+    assert excinfo.value.status_code == 400
+
+    # Test Save behavior
+    # Test save of file in hidden directory
+    with pytest.raises(HTTPError) as excinfo:
+        td = str(tmp_path)
+        cm = jp_file_contents_manager_class(root_dir=td)
+        hidden_dir = ".hidden"
+        file_in_hidden_path = os.path.join(hidden_dir, "visible.txt")
+        _make_dir(cm, hidden_dir)
+        model = await ensure_async(cm.new(path=file_in_hidden_path))
+        os_path = cm._get_os_path(model["path"])
+
+        try:
+            result = await ensure_async(cm.save(model, path=os_path))
+        except HTTPError as e:
+            assert e.status_code == 400
+
+    # Test save hidden file in visible directory
+    with pytest.raises(HTTPError) as excinfo:
+        td = str(tmp_path)
+        cm = jp_file_contents_manager_class(root_dir=td)
+        hidden_dir = "visible"
+        file_in_hidden_path = os.path.join(hidden_dir, ".hidden.txt")
+        _make_dir(cm, hidden_dir)
+        model = await ensure_async(cm.new(path=file_in_hidden_path))
+        os_path = cm._get_os_path(model["path"])
+
+        try:
+            result = await ensure_async(cm.save(model, path=os_path))
+        except HTTPError as e:
+            assert e.status_code == 400
+
+    # Test rename behavior
+    # Test rename with source file in hidden directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = ".hidden"
+    file_in_hidden_path = os.path.join(hidden_dir, "visible.txt")
+    _make_dir(cm, hidden_dir)
+    old_path = file_in_hidden_path
+    new_path = "new.txt"
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.rename_file(old_path, new_path))
+    assert excinfo.value.status_code == 400
+
+    # Test rename of dest file in hidden directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = ".hidden"
+    file_in_hidden_path = os.path.join(hidden_dir, "visible.txt")
+    _make_dir(cm, hidden_dir)
+    new_path = file_in_hidden_path
+    old_path = "old.txt"
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.rename_file(old_path, new_path))
+    assert excinfo.value.status_code == 400
+
+    # Test rename with hidden source file in visible directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = "visible"
+    file_in_hidden_path = os.path.join(hidden_dir, ".hidden.txt")
+    _make_dir(cm, hidden_dir)
+    old_path = file_in_hidden_path
+    new_path = "new.txt"
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.rename_file(old_path, new_path))
+    assert excinfo.value.status_code == 400
+
+    # Test rename with hidden dest file in visible directory
+    td = str(tmp_path)
+    cm = jp_file_contents_manager_class(root_dir=td)
+    hidden_dir = "visible"
+    file_in_hidden_path = os.path.join(hidden_dir, ".hidden.txt")
+    _make_dir(cm, hidden_dir)
+    new_path = file_in_hidden_path
+    old_path = "old.txt"
+
+    with pytest.raises(HTTPError) as excinfo:
+        await ensure_async(cm.rename_file(old_path, new_path))
+    assert excinfo.value.status_code == 400
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Can't test hidden files on Windows")
+async def test_404(jp_file_contents_manager_class, tmp_path):
+    # Test visible file in hidden folder
+    with pytest.raises(HTTPError) as excinfo:
+        td = str(tmp_path)
+        cm = jp_file_contents_manager_class(root_dir=td)
+        hidden_dir = ".hidden"
+        file_in_hidden_path = os.path.join(hidden_dir, "visible.txt")
+        _make_dir(cm, hidden_dir)
+        model = await ensure_async(cm.new(path=file_in_hidden_path))
+        os_path = cm._get_os_path(model["path"])
+
+        try:
+            result = await ensure_async(cm.get(os_path, "w"))
+        except HTTPError as e:
+            assert e.status_code == 404
+
+    # Test hidden file in visible folder
+    with pytest.raises(HTTPError) as excinfo:
+        td = str(tmp_path)
+        cm = jp_file_contents_manager_class(root_dir=td)
+        hidden_dir = "visible"
+        file_in_hidden_path = os.path.join(hidden_dir, ".hidden.txt")
+        _make_dir(cm, hidden_dir)
+        model = await ensure_async(cm.new(path=file_in_hidden_path))
+        os_path = cm._get_os_path(model["path"])
+
+        try:
+            result = await ensure_async(cm.get(os_path, "w"))
+        except HTTPError as e:
+            assert e.status_code == 404
 
 
 async def test_escape_root(jp_file_contents_manager_class, tmp_path):
@@ -394,7 +538,7 @@ async def test_get(jp_contents_manager):
     assert "path" in model2
     assert "content" in model2
     assert model2["name"] == "Untitled.ipynb"
-    assert model2["path"] == "{0}/{1}".format(sub_dir.strip("/"), name)
+    assert model2["path"] == "{}/{}".format(sub_dir.strip("/"), name)
 
     # Test with a regular file.
     file_model_path = (await ensure_async(cm.new_untitled(path=sub_dir, ext=".txt")))["path"]
@@ -645,7 +789,7 @@ async def test_copy(jp_contents_manager):
     cm = jp_contents_manager
     parent = "å b"
     name = "nb √.ipynb"
-    path = "{0}/{1}".format(parent, name)
+    path = f"{parent}/{name}"
     _make_dir(cm, parent)
 
     orig = await ensure_async(cm.new(path=path))
@@ -657,10 +801,19 @@ async def test_copy(jp_contents_manager):
     copy2 = await ensure_async(cm.copy(path, "å b/copy 2.ipynb"))
     assert copy2["name"] == "copy 2.ipynb"
     assert copy2["path"] == "å b/copy 2.ipynb"
+
     # copy with specified path
     copy2 = await ensure_async(cm.copy(path, "/"))
     assert copy2["name"] == name
     assert copy2["path"] == name
+
+    # copy to destination whose parent dir does not exist
+    with pytest.raises(HTTPError) as e:
+        await ensure_async(cm.copy(path, "å x/copy 2.ipynb"))
+
+    copy3 = await ensure_async(cm.copy(path, "/copy 3.ipynb"))
+    assert copy3["name"] == "copy 3.ipynb"
+    assert copy3["path"] == "copy 3.ipynb"
 
 
 async def test_mark_trusted_cells(jp_contents_manager):
@@ -746,7 +899,7 @@ async def test_validate_notebook_model(jp_contents_manager):
     with patch("jupyter_server.services.contents.manager.validate_nb") as mock_validate_nb:
         # Valid notebook and a non-None dictionary, no validate call expected
 
-        validation_error = {}
+        validation_error: dict = {}
         cm.validate_notebook_model(model, validation_error)
         assert mock_validate_nb.call_count == 0
         mock_validate_nb.reset_mock()

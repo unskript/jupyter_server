@@ -1,4 +1,3 @@
-# encoding: utf-8
 """
 Utilities for getting information about Jupyter and the system it's running in.
 """
@@ -74,17 +73,17 @@ def pkg_info(pkg_path):
         with named parameters of interest
     """
     src, hsh = pkg_commit_hash(pkg_path)
-    return dict(
-        jupyter_server_version=jupyter_server.__version__,
-        jupyter_server_path=pkg_path,
-        commit_source=src,
-        commit_hash=hsh,
-        sys_version=sys.version,
-        sys_executable=sys.executable,
-        sys_platform=sys.platform,
-        platform=platform.platform(),
-        os_name=os.name,
-    )
+    return {
+        "jupyter_server_version": jupyter_server.__version__,
+        "jupyter_server_path": pkg_path,
+        "commit_source": src,
+        "commit_hash": hsh,
+        "sys_version": sys.version,
+        "sys_executable": sys.executable,
+        "sys_platform": sys.platform,
+        "platform": platform.platform(),
+        "os_name": os.name,
+    }
 
 
 def get_sys_info():

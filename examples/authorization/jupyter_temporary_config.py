@@ -1,3 +1,4 @@
+"""Nbclassic temporary server auth example."""
 from jupyter_server.auth import Authorizer
 
 
@@ -11,4 +12,4 @@ class TemporaryServerPersonality(Authorizer):
         return True
 
 
-c.ServerApp.authorizer_class = TemporaryServerPersonality
+c.ServerApp.authorizer_class = TemporaryServerPersonality  # type:ignore[name-defined]

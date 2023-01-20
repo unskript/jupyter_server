@@ -3,7 +3,6 @@ Password generation for the Jupyter Server.
 """
 import getpass
 import hashlib
-import io
 import json
 import os
 import random
@@ -12,9 +11,7 @@ import warnings
 from contextlib import contextmanager
 
 from jupyter_core.paths import jupyter_config_dir
-from traitlets.config import Config
-from traitlets.config import ConfigFileNotFound
-from traitlets.config import JSONFileConfigLoader
+from traitlets.config import Config, ConfigFileNotFound, JSONFileConfigLoader
 
 # Length of the salt in nr of hex chars, which implies salt_len * 4
 # bits of randomness.
@@ -55,9 +52,10 @@ def passwd(passphrase=None, algorithm="argon2"):
                 passphrase = p0
                 break
             else:
-                print("Passwords do not match.")
+                warnings.warn("Passwords do not match.")
         else:
-            raise ValueError("No matching passwords found. Giving up.")
+            msg = "No matching passwords found. Giving up."
+            raise ValueError(msg)
 
     if algorithm == "argon2":
         import argon2
@@ -67,9 +65,9 @@ def passwd(passphrase=None, algorithm="argon2"):
             time_cost=10,
             parallelism=8,
         )
-        h = ph.hash(passphrase)
+        h_ph = ph.hash(passphrase)
 
-        return ":".join((algorithm, h))
+        return ":".join((algorithm, h_ph))
 
     h = hashlib.new(algorithm)
     salt = ("%0" + str(salt_len) + "x") % random.getrandbits(4 * salt_len)
@@ -156,14 +154,14 @@ def persist_config(config_file=None, mode=0o600):
 
     yield config
 
-    with io.open(config_file, "w", encoding="utf8") as f:
+    with open(config_file, "w", encoding="utf8") as f:
         f.write(json.dumps(config, indent=2))
 
     try:
         os.chmod(config_file, mode)
     except Exception:
         tb = traceback.format_exc()
-        warnings.warn("Failed to set permissions on %s:\n%s" % (config_file, tb), RuntimeWarning)
+        warnings.warn(f"Failed to set permissions on {config_file}:\n{tb}", RuntimeWarning)
 
 
 def set_password(password=None, config_file=None):
@@ -172,4 +170,5 @@ def set_password(password=None, config_file=None):
     hashed_password = passwd(password)
 
     with persist_config(config_file) as config:
-        config.ServerApp.password = hashed_password
+        config.IdentityProvider.hashed_password = hashed_password
+    return hashed_password

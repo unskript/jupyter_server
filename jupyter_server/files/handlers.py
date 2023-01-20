@@ -1,20 +1,20 @@
 """Serve files directly from the ContentsManager."""
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
-import json
 import mimetypes
 from base64 import decodebytes
+from typing import List
 
+from jupyter_core.utils import ensure_async
 from tornado import web
 
 from jupyter_server.auth import authorized
 from jupyter_server.base.handlers import JupyterHandler
-from jupyter_server.utils import ensure_async
 
 AUTH_RESOURCE = "contents"
 
 
-class FilesHandler(JupyterHandler):
+class FilesHandler(JupyterHandler, web.StaticFileHandler):
     """serve files via ContentsManager
 
     Normally used when ContentsManager is not a FileContentsManager.
@@ -27,13 +27,15 @@ class FilesHandler(JupyterHandler):
 
     @property
     def content_security_policy(self):
+        """The content security policy."""
         # In case we're serving HTML/SVG, confine any Javascript to a unique
         # origin so it can't interact with the notebook server.
-        return super(FilesHandler, self).content_security_policy + "; sandbox allow-scripts"
+        return super().content_security_policy + "; sandbox allow-scripts"
 
     @web.authenticated
     @authorized
     def head(self, path):
+        """The head response."""
         self.get(path, include_body=False)
         self.check_xsrf_cookie()
         return self.get(path, include_body=False)
@@ -41,6 +43,7 @@ class FilesHandler(JupyterHandler):
     @web.authenticated
     @authorized
     async def get(self, path, include_body=True):
+        """Get a file by path."""
         # /files/ requests must originate from the same site
         self.check_xsrf_cookie()
         cm = self.contents_manager
@@ -57,7 +60,7 @@ class FilesHandler(JupyterHandler):
 
         model = await ensure_async(cm.get(path, type="file", content=include_body))
 
-        if self.get_argument("download", False):
+        if self.get_argument("download", None):
             self.set_attachment_header(name)
 
         # get mimetype from filename
@@ -84,11 +87,9 @@ class FilesHandler(JupyterHandler):
             if model["format"] == "base64":
                 b64_bytes = model["content"].encode("ascii")
                 self.write(decodebytes(b64_bytes))
-            elif model["format"] == "json":
-                self.write(json.dumps(model["content"]))
             else:
                 self.write(model["content"])
             self.flush()
 
 
-default_handlers = []
+default_handlers: List[JupyterHandler] = []

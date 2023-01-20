@@ -9,13 +9,15 @@ from jupyter_core.utils import ensure_dir_exists
 from tornado.web import HTTPError
 from traitlets import Unicode
 
-from .checkpoints import AsyncCheckpoints
-from .checkpoints import AsyncGenericCheckpointsMixin
-from .checkpoints import Checkpoints
-from .checkpoints import GenericCheckpointsMixin
-from .fileio import AsyncFileManagerMixin
-from .fileio import FileManagerMixin
 from jupyter_server import _tz as tz
+
+from .checkpoints import (
+    AsyncCheckpoints,
+    AsyncGenericCheckpointsMixin,
+    Checkpoints,
+    GenericCheckpointsMixin,
+)
+from .fileio import AsyncFileManagerMixin, FileManagerMixin
 
 
 class FileCheckpoints(FileManagerMixin, Checkpoints):
@@ -122,15 +124,15 @@ class FileCheckpoints(FileManagerMixin, Checkpoints):
         """construct the info dict for a given checkpoint"""
         stats = os.stat(os_path)
         last_modified = tz.utcfromtimestamp(stats.st_mtime)
-        info = dict(
-            id=checkpoint_id,
-            last_modified=last_modified,
-        )
+        info = {
+            "id": checkpoint_id,
+            "last_modified": last_modified,
+        }
         return info
 
     # Error Handling
     def no_such_checkpoint(self, path, checkpoint_id):
-        raise HTTPError(404, "Checkpoint does not exist: %s@%s" % (path, checkpoint_id))
+        raise HTTPError(404, f"Checkpoint does not exist: {path}@{checkpoint_id}")
 
 
 class AsyncFileCheckpoints(FileCheckpoints, AsyncFileManagerMixin, AsyncCheckpoints):
@@ -152,10 +154,10 @@ class AsyncFileCheckpoints(FileCheckpoints, AsyncFileManagerMixin, AsyncCheckpoi
         """construct the info dict for a given checkpoint"""
         stats = await run_sync(os.stat, os_path)
         last_modified = tz.utcfromtimestamp(stats.st_mtime)
-        info = dict(
-            id=checkpoint_id,
-            last_modified=last_modified,
-        )
+        info = {
+            "id": checkpoint_id,
+            "last_modified": last_modified,
+        }
         return info
 
     # ContentsManager-independent checkpoint API

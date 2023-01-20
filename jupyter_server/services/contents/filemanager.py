@@ -7,30 +7,25 @@ import os
 import shutil
 import stat
 import sys
+import warnings
 from datetime import datetime
+from pathlib import Path
 
 import nbformat
 from anyio.to_thread import run_sync
-from jupyter_core.paths import exists
-from jupyter_core.paths import is_file_hidden
-from jupyter_core.paths import is_hidden
+from jupyter_core.paths import exists, is_file_hidden, is_hidden
 from send2trash import send2trash
 from tornado import web
-from traitlets import Bool
-from traitlets import default
-from traitlets import TraitError
-from traitlets import Unicode
-from traitlets import validate
+from traitlets import Bool, TraitError, Unicode, default, validate
 
-from .filecheckpoints import AsyncFileCheckpoints
-from .filecheckpoints import FileCheckpoints
-from .fileio import AsyncFileManagerMixin
-from .fileio import FileManagerMixin
-from .manager import AsyncContentsManager
-from .manager import ContentsManager
 from jupyter_server import _tz as tz
 from jupyter_server.base.handlers import AuthenticatedFileHandler
 from jupyter_server.transutils import _i18n
+from jupyter_server.utils import to_api_path
+
+from .filecheckpoints import AsyncFileCheckpoints, FileCheckpoints
+from .fileio import AsyncFileManagerMixin, FileManagerMixin
+from .manager import AsyncContentsManager, ContentsManager
 
 try:
     from os.path import samefile
@@ -42,6 +37,7 @@ _script_exporter = None
 
 
 class FileContentsManager(FileManagerMixin, ContentsManager):
+    """A file contents manager."""
 
     root_dir = Unicode(config=True)
 
@@ -54,7 +50,6 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
     @validate("root_dir")
     def _validate_root_dir(self, proposal):
-        """Do a bit of validation of the root_dir."""
         value = proposal["value"]
         if not os.path.isabs(value):
             # If we receive a non-absolute path, make it absolute.
@@ -62,6 +57,34 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         if not os.path.isdir(value):
             raise TraitError("%r is not a directory" % value)
         return value
+
+    @default("preferred_dir")
+    def _default_preferred_dir(self):
+        try:
+            value = self.parent.preferred_dir
+            if value == self.parent.root_dir:
+                value = None
+        except AttributeError:
+            pass
+        else:
+            if value is not None:
+                warnings.warn(
+                    "ServerApp.preferred_dir config is deprecated in jupyter-server 2.0. Use FileContentsManager.preferred_dir instead",
+                    FutureWarning,
+                    stacklevel=3,
+                )
+                try:
+                    path = Path(value)
+                    return path.relative_to(self.root_dir).as_posix()
+                except ValueError:
+                    raise TraitError("%s is outside root contents directory" % value) from None
+        return ""
+
+    @validate("preferred_dir")
+    def _validate_preferred_dir(self, proposal):
+        # It should be safe to pass an API path through this method:
+        proposal["value"] = to_api_path(proposal["value"], self.root_dir)
+        return super()._validate_preferred_dir(proposal)
 
     @default("checkpoints_class")
     def _checkpoints_class_default(self):
@@ -98,7 +121,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check. This is an API path (`/` separated,
             relative to root_dir).
 
@@ -116,7 +139,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check. This is an API path (`/` separated,
             relative to root_dir).
 
@@ -140,7 +163,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The relative path to the file (with '/' as separator)
 
         Returns
@@ -159,7 +182,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The path to check. This is an API path (`/` separated,
             relative to root_dir).
 
@@ -179,7 +202,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
         Parameters
         ----------
-        path : string
+        path : str
             The API path to the file (with '/' as separator)
 
         Returns
@@ -195,6 +218,12 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         """Build the common base of a contents model"""
         os_path = self._get_os_path(path)
         info = os.lstat(os_path)
+
+        four_o_four = "file or directory does not exist: %r" % path
+
+        if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
+            self.log.info("Refusing to serve hidden file or directory %r, via 404 Error", os_path)
+            raise web.HTTPError(404, four_o_four)
 
         try:
             # size of file
@@ -282,7 +311,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
                 try:
                     if self.should_list(name):
                         if self.allow_hidden or not is_file_hidden(os_path, stat_res=st):
-                            contents.append(self.get(path="%s/%s" % (path, name), content=False))
+                            contents.append(self.get(path=f"{path}/{name}", content=False))
                 except OSError as e:
                     # ELOOP: recursive symlink, also don't show failure due to permissions
                     if e.errno not in [errno.ELOOP, errno.EACCES]:
@@ -339,7 +368,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         os_path = self._get_os_path(path)
 
         if content:
-            validation_error = {}
+            validation_error: dict = {}
             nb = self._read_notebook(
                 os_path, as_version=4, capture_validation_error=validation_error
             )
@@ -373,16 +402,21 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
             of the file or directory as well.
         """
         path = path.strip("/")
+        os_path = self._get_os_path(path)
+        four_o_four = "file or directory does not exist: %r" % path
 
         if not self.exists(path):
-            raise web.HTTPError(404, "No such file or directory: %s" % path)
+            raise web.HTTPError(404, four_o_four)
 
-        os_path = self._get_os_path(path)
+        if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
+            self.log.info("Refusing to serve hidden file or directory %r, via 404 Error", os_path)
+            raise web.HTTPError(404, four_o_four)
+
         if os.path.isdir(os_path):
             if type not in (None, "directory"):
                 raise web.HTTPError(
                     400,
-                    "%s is a directory, not a %s" % (path, type),
+                    f"{path} is a directory, not a {type}",
                     reason="bad type",
                 )
             model = self._dir_model(path, content=content)
@@ -392,12 +426,13 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
             if type == "directory":
                 raise web.HTTPError(400, "%s is not a directory" % path, reason="bad type")
             model = self._file_model(path, content=content, format=format)
+        self.emit(data={"action": "get", "path": path})
         return model
 
     def _save_directory(self, os_path, model, path=""):
         """create a directory"""
         if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
-            raise web.HTTPError(400, "Cannot create hidden directory %r" % os_path)
+            raise web.HTTPError(400, "Cannot create directory %r" % os_path)
         if not os.path.exists(os_path):
             with self.perm_to_403():
                 os.mkdir(os_path)
@@ -418,9 +453,13 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
             raise web.HTTPError(400, "No file content provided")
 
         os_path = self._get_os_path(path)
+
+        if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
+            raise web.HTTPError(400, f"Cannot create file or directory {os_path!r}")
+
         self.log.debug("Saving %s", os_path)
 
-        validation_error = {}
+        validation_error: dict = {}
         try:
             if model["type"] == "notebook":
                 nb = nbformat.from_dict(model["content"])
@@ -440,7 +479,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
             raise
         except Exception as e:
             self.log.error("Error while saving file: %s %s", path, e, exc_info=True)
-            raise web.HTTPError(500, "Unexpected error while saving file: %s %s" % (path, e)) from e
+            raise web.HTTPError(500, f"Unexpected error while saving file: {path} {e}") from e
 
         validation_message = None
         if model["type"] == "notebook":
@@ -452,7 +491,7 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
             model["message"] = validation_message
 
         self.run_post_save_hooks(model=model, os_path=os_path)
-
+        self.emit(data={"action": "save", "path": path})
         return model
 
     def delete_file(self, path):
@@ -460,8 +499,13 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         path = path.strip("/")
         os_path = self._get_os_path(path)
         rm = os.unlink
-        if not os.path.exists(os_path):
-            raise web.HTTPError(404, "File or directory does not exist: %s" % os_path)
+
+        if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
+            raise web.HTTPError(400, f"Cannot delete file or directory {os_path!r}")
+
+        four_o_four = "file or directory does not exist: %r" % path
+        if not self.exists(path):
+            raise web.HTTPError(404, four_o_four)
 
         def _check_trash(os_path):
             if sys.platform in {"win32", "darwin"}:
@@ -526,6 +570,11 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         new_os_path = self._get_os_path(new_path)
         old_os_path = self._get_os_path(old_path)
 
+        if (
+            is_hidden(old_os_path, self.root_dir) or is_hidden(new_os_path, self.root_dir)
+        ) and not self.allow_hidden:
+            raise web.HTTPError(400, f"Cannot rename file or directory {old_os_path!r}")
+
         # Should we proceed with the move?
         if os.path.exists(new_os_path) and not samefile(old_os_path, new_os_path):
             raise web.HTTPError(409, "File already exists: %s" % new_path)
@@ -537,9 +586,10 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
         except web.HTTPError:
             raise
         except Exception as e:
-            raise web.HTTPError(500, "Unknown error renaming file: %s %s" % (old_path, e)) from e
+            raise web.HTTPError(500, f"Unknown error renaming file: {old_path} {e}") from e
 
     def info_string(self):
+        """Get the information string for the manager."""
         return _i18n("Serving notebooks from local directory: %s") % self.root_dir
 
     def get_kernel_path(self, path, model=None):
@@ -554,6 +604,8 @@ class FileContentsManager(FileManagerMixin, ContentsManager):
 
 
 class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, AsyncContentsManager):
+    """An async file contents manager."""
+
     @default("checkpoints_class")
     def _checkpoints_class_default(self):
         return AsyncFileCheckpoints
@@ -608,9 +660,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
                 try:
                     if self.should_list(name):
                         if self.allow_hidden or not is_file_hidden(os_path, stat_res=st):
-                            contents.append(
-                                await self.get(path="%s/%s" % (path, name), content=False)
-                            )
+                            contents.append(await self.get(path=f"{path}/{name}", content=False))
                 except OSError as e:
                     # ELOOP: recursive symlink, also don't show failure due to permissions
                     if e.errno not in [errno.ELOOP, errno.EACCES]:
@@ -667,7 +717,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         os_path = self._get_os_path(path)
 
         if content:
-            validation_error = {}
+            validation_error: dict = {}
             nb = await self._read_notebook(
                 os_path, as_version=4, capture_validation_error=validation_error
             )
@@ -710,7 +760,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
             if type not in (None, "directory"):
                 raise web.HTTPError(
                     400,
-                    "%s is a directory, not a %s" % (path, type),
+                    f"{path} is a directory, not a {type}",
                     reason="bad type",
                 )
             model = await self._dir_model(path, content=content)
@@ -720,6 +770,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
             if type == "directory":
                 raise web.HTTPError(400, "%s is not a directory" % path, reason="bad type")
             model = await self._file_model(path, content=content, format=format)
+        self.emit(data={"action": "get", "path": path})
         return model
 
     async def _save_directory(self, os_path, model, path=""):
@@ -738,7 +789,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         """Save the file model and return the model with no content."""
         path = path.strip("/")
 
-        self.run_pre_save_hook(model=model, path=path)
+        self.run_pre_save_hooks(model=model, path=path)
 
         if "type" not in model:
             raise web.HTTPError(400, "No file type provided")
@@ -748,7 +799,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         os_path = self._get_os_path(path)
         self.log.debug("Saving %s", os_path)
 
-        validation_error = {}
+        validation_error: dict = {}
         try:
             if model["type"] == "notebook":
                 nb = nbformat.from_dict(model["content"])
@@ -768,7 +819,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
             raise
         except Exception as e:
             self.log.error("Error while saving file: %s %s", path, e, exc_info=True)
-            raise web.HTTPError(500, "Unexpected error while saving file: %s %s" % (path, e)) from e
+            raise web.HTTPError(500, f"Unexpected error while saving file: {path} {e}") from e
 
         validation_message = None
         if model["type"] == "notebook":
@@ -780,7 +831,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
             model["message"] = validation_message
 
         self.run_post_save_hooks(model=model, os_path=os_path)
-
+        self.emit(data={"action": "save", "path": path})
         return model
 
     async def delete_file(self, path):
@@ -788,6 +839,10 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         path = path.strip("/")
         os_path = self._get_os_path(path)
         rm = os.unlink
+
+        if is_hidden(os_path, self.root_dir) and not self.allow_hidden:
+            raise web.HTTPError(400, f"Cannot delete file or directory {os_path!r}")
+
         if not os.path.exists(os_path):
             raise web.HTTPError(404, "File or directory does not exist: %s" % os_path)
 
@@ -859,6 +914,11 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         new_os_path = self._get_os_path(new_path)
         old_os_path = self._get_os_path(old_path)
 
+        if (
+            is_hidden(old_os_path, self.root_dir) or is_hidden(new_os_path, self.root_dir)
+        ) and not self.allow_hidden:
+            raise web.HTTPError(400, f"Cannot rename file or directory {old_os_path!r}")
+
         # Should we proceed with the move?
         if os.path.exists(new_os_path) and not samefile(old_os_path, new_os_path):
             raise web.HTTPError(409, "File already exists: %s" % new_path)
@@ -870,7 +930,7 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         except web.HTTPError:
             raise
         except Exception as e:
-            raise web.HTTPError(500, "Unknown error renaming file: %s %s" % (old_path, e)) from e
+            raise web.HTTPError(500, f"Unknown error renaming file: {old_path} {e}") from e
 
     async def dir_exists(self, path):
         """Does a directory exist at the given path"""
@@ -889,3 +949,13 @@ class AsyncFileContentsManager(FileContentsManager, AsyncFileManagerMixin, Async
         path = path.strip("/")
         os_path = self._get_os_path(path=path)
         return is_hidden(os_path, self.root_dir)
+
+    async def get_kernel_path(self, path, model=None):
+        """Return the initial API path of a kernel associated with a given notebook"""
+        if await self.dir_exists(path):
+            return path
+        if "/" in path:
+            parent_dir = path.rsplit("/", 1)[0]
+        else:
+            parent_dir = ""
+        return parent_dir

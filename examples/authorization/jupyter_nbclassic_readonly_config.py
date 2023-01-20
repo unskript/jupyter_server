@@ -1,3 +1,4 @@
+"""Nbclassic read only auth example."""
 from jupyter_server.auth import Authorizer
 
 
@@ -11,4 +12,4 @@ class ReadOnly(Authorizer):
         return True
 
 
-c.ServerApp.authorizer_class = ReadOnly
+c.ServerApp.authorizer_class = ReadOnly  # type:ignore[name-defined]

@@ -10,16 +10,13 @@ try:
     from jupyter_client.jsonutil import json_default
 except ImportError:
     from jupyter_client.jsonutil import date_default as json_default
+
+from jupyter_core.utils import ensure_async
 from tornado import web
 
-from jupyter_server.base.handlers import APIHandler
-from jupyter_server.base.handlers import JupyterHandler
-from jupyter_server.base.handlers import path_regex
-from jupyter_server.utils import ensure_async
-from jupyter_server.utils import url_escape
-from jupyter_server.utils import url_path_join
 from jupyter_server.auth import authorized
-
+from jupyter_server.base.handlers import APIHandler, JupyterHandler, path_regex
+from jupyter_server.utils import url_escape, url_path_join
 
 AUTH_RESOURCE = "contents"
 
@@ -46,7 +43,7 @@ def validate_model(model, expect_content):
     if missing:
         raise web.HTTPError(
             500,
-            "Missing Model Keys: {missing}".format(missing=missing),
+            f"Missing Model Keys: {missing}",
         )
 
     maybe_none_keys = ["content", "format"]
@@ -55,22 +52,26 @@ def validate_model(model, expect_content):
         if errors:
             raise web.HTTPError(
                 500,
-                "Keys unexpectedly None: {keys}".format(keys=errors),
+                f"Keys unexpectedly None: {errors}",
             )
     else:
-        errors = {key: model[key] for key in maybe_none_keys if model[key] is not None}
+        errors = {key: model[key] for key in maybe_none_keys if model[key] is not None}  # type: ignore[assignment]
         if errors:
             raise web.HTTPError(
                 500,
-                "Keys unexpectedly not None: {keys}".format(keys=errors),
+                f"Keys unexpectedly not None: {errors}",
             )
 
 
 class ContentsAPIHandler(APIHandler):
+    """A contents API handler."""
+
     auth_resource = AUTH_RESOURCE
 
 
 class ContentsHandler(ContentsAPIHandler):
+    """A contents handler."""
+
     def location_url(self, path):
         """Return the full URL location of a file.
 
@@ -99,17 +100,23 @@ class ContentsHandler(ContentsAPIHandler):
         of the files and directories it contains.
         """
         path = path or ""
+        cm = self.contents_manager
+
         type = self.get_query_argument("type", default=None)
         if type not in {None, "directory", "file", "notebook"}:
-            raise web.HTTPError(400, "Type %r is invalid" % type)
+            # fall back to file if unknown type
+            type = "file"
 
         format = self.get_query_argument("format", default=None)
         if format not in {None, "text", "base64"}:
             raise web.HTTPError(400, "Format %r is invalid" % format)
-        content = self.get_query_argument("content", default="1")
-        if content not in {"0", "1"}:
-            raise web.HTTPError(400, "Content %r is invalid" % content)
-        content = int(content)
+        content_str = self.get_query_argument("content", default="1")
+        if content_str not in {"0", "1"}:
+            raise web.HTTPError(400, "Content %r is invalid" % content_str)
+        content = int(content_str or "")
+
+        if await ensure_async(cm.is_hidden(path)) and not cm.allow_hidden:
+            raise web.HTTPError(404, f"file or directory {path!r} does not exist")
 
         model = await ensure_async(
             self.contents_manager.get(
@@ -130,6 +137,17 @@ class ContentsHandler(ContentsAPIHandler):
         model = self.get_json_body()
         if model is None:
             raise web.HTTPError(400, "JSON body missing")
+
+        old_path = model.get("path")
+        if (
+            old_path
+            and (
+                await ensure_async(cm.is_hidden(path)) or await ensure_async(cm.is_hidden(old_path))
+            )
+            and not cm.allow_hidden
+        ):
+            raise web.HTTPError(400, f"Cannot rename file or directory {path!r}")
+
         model = await ensure_async(cm.update(model, path))
         validate_model(model, expect_content=False)
         self._finish_model(model)
@@ -194,19 +212,23 @@ class ContentsHandler(ContentsAPIHandler):
         if file_exists:
             raise web.HTTPError(400, "Cannot POST to files, use PUT instead.")
 
-        dir_exists = await ensure_async(cm.dir_exists(path))
-        if not dir_exists:
-            raise web.HTTPError(404, "No such directory: %s" % path)
-
         model = self.get_json_body()
-
-        if model is not None:
+        if model:
             copy_from = model.get("copy_from")
-            ext = model.get("ext", "")
-            type = model.get("type", "")
             if copy_from:
-                await self._copy(copy_from, path)
+                if not cm.allow_hidden and (
+                    await ensure_async(cm.is_hidden(path))
+                    or await ensure_async(cm.is_hidden(copy_from))
+                ):
+                    raise web.HTTPError(400, f"Cannot copy file or directory {path!r}")
+                else:
+                    await self._copy(copy_from, path)
             else:
+                ext = model.get("ext", "")
+                type = model.get("type", "")
+                if type not in {None, "", "directory", "file", "notebook"}:
+                    # fall back to file if unknown type
+                    type = "file"
                 await self._new_untitled(path, type=type, ext=ext)
         else:
             await self._new_untitled(path)
@@ -225,10 +247,21 @@ class ContentsHandler(ContentsAPIHandler):
           create a new empty notebook.
         """
         model = self.get_json_body()
+        cm = self.contents_manager
+
         if model:
             if model.get("copy_from"):
                 raise web.HTTPError(400, "Cannot copy with PUT, only POST")
+            if (
+                (model.get("path") and await ensure_async(cm.is_hidden(model.get("path"))))
+                or await ensure_async(cm.is_hidden(path))
+            ) and not cm.allow_hidden:
+                raise web.HTTPError(400, f"Cannot create file or directory {path!r}")
+
             exists = await ensure_async(self.contents_manager.file_exists(path))
+            if model.get("type", "") not in {None, "", "directory", "file", "notebook"}:
+                # fall back to file if unknown type
+                model["type"] = "file"
             if exists:
                 await self._save(model, path)
             else:
@@ -241,6 +274,10 @@ class ContentsHandler(ContentsAPIHandler):
     async def delete(self, path=""):
         """delete a file in the given path"""
         cm = self.contents_manager
+
+        if await ensure_async(cm.is_hidden(path)) and not cm.allow_hidden:
+            raise web.HTTPError(400, f"Cannot delete file or directory {path!r}")
+
         self.log.warning("delete %s", path)
         await ensure_async(cm.delete(path))
         self.set_status(204)
@@ -248,6 +285,8 @@ class ContentsHandler(ContentsAPIHandler):
 
 
 class CheckpointsHandler(ContentsAPIHandler):
+    """A checkpoints API handler."""
+
     @web.authenticated
     @authorized
     async def get(self, path=""):
@@ -277,6 +316,8 @@ class CheckpointsHandler(ContentsAPIHandler):
 
 
 class ModifyCheckpointsHandler(ContentsAPIHandler):
+    """A checkpoints modification handler."""
+
     @web.authenticated
     @authorized
     async def post(self, path, checkpoint_id):
@@ -299,9 +340,10 @@ class ModifyCheckpointsHandler(ContentsAPIHandler):
 class NotebooksRedirectHandler(JupyterHandler):
     """Redirect /api/notebooks to /api/contents"""
 
-    SUPPORTED_METHODS = ("GET", "PUT", "PATCH", "POST", "DELETE")
+    SUPPORTED_METHODS = ("GET", "PUT", "PATCH", "POST", "DELETE")  # type:ignore[assignment]
 
     def get(self, path):
+        """Handle a notebooks redirect."""
         self.log.warning("/api/notebooks is deprecated, use /api/contents")
         self.redirect(url_path_join(self.base_url, "api/contents", url_escape(path)))
 
@@ -314,6 +356,7 @@ class TrustNotebooksHandler(JupyterHandler):
     @web.authenticated
     @authorized(resource=AUTH_RESOURCE)
     async def post(self, path=""):
+        """Trust a notebook by path."""
         cm = self.contents_manager
         await ensure_async(cm.trust_notebook(path))
         self.set_status(201)
@@ -331,7 +374,7 @@ _checkpoint_id_regex = r"(?P<checkpoint_id>[\w-]+)"
 default_handlers = [
     (r"/api/contents%s/checkpoints" % path_regex, CheckpointsHandler),
     (
-        r"/api/contents%s/checkpoints/%s" % (path_regex, _checkpoint_id_regex),
+        rf"/api/contents{path_regex}/checkpoints/{_checkpoint_id_regex}",
         ModifyCheckpointsHandler,
     ),
     (r"/api/contents%s/trust" % path_regex, TrustNotebooksHandler),

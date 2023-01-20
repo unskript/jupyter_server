@@ -7,9 +7,17 @@ allows all authenticated requests
 """
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from traitlets import Instance
 from traitlets.config import LoggingConfigurable
 
-from jupyter_server.base.handlers import JupyterHandler
+from .identity import IdentityProvider, User
+
+if TYPE_CHECKING:
+    from jupyter_server.base.handlers import JupyterHandler
 
 
 class Authorizer(LoggingConfigurable):
@@ -18,10 +26,10 @@ class Authorizer(LoggingConfigurable):
 
     All authorizers used in Jupyter Server
     should inherit from this base class and, at the very minimum,
-    implement an `is_authorized` method with the
+    implement an ``is_authorized`` method with the
     same signature as in this base class.
 
-    The `is_authorized` method is called by the `@authorized` decorator
+    The ``is_authorized`` method is called by the ``@authorized`` decorator
     in JupyterHandler. If it returns True, the incoming request
     to the server is accepted; if it returns False, the server
     returns a 403 (Forbidden) error code.
@@ -32,23 +40,30 @@ class Authorizer(LoggingConfigurable):
     .. versionadded:: 2.0
     """
 
-    def is_authorized(self, handler: JupyterHandler, user: str, action: str, resource: str) -> bool:
-        """A method to determine if `user` is authorized to perform `action`
-        (read, write, or execute) on the `resource` type.
+    identity_provider = Instance(IdentityProvider)
+
+    def is_authorized(
+        self, handler: JupyterHandler, user: User, action: str, resource: str
+    ) -> bool:
+        """A method to determine if ``user`` is authorized to perform ``action``
+        (read, write, or execute) on the ``resource`` type.
 
         Parameters
         ----------
-        user : usually a dict or string
-            A truthy model representing the authenticated user.
-            A username string by default,
-            but usually a dict when integrating with an auth provider.
+        user : jupyter_server.auth.User
+            An object representing the authenticated user,
+            as returned by :meth:`jupyter_server.auth.IdentityProvider.get_user`.
+
         action : str
             the category of action for the current request: read, write, or execute.
 
         resource : str
             the type of resource (i.e. contents, kernels, files, etc.) the user is requesting.
 
-        Returns True if user authorized to make request; otherwise, returns False.
+        Returns
+        -------
+        bool
+            True if user authorized to make request; False, otherwise
         """
         raise NotImplementedError()
 
@@ -61,7 +76,9 @@ class AllowAllAuthorizer(Authorizer):
     .. versionadded:: 2.0
     """
 
-    def is_authorized(self, handler: JupyterHandler, user: str, action: str, resource: str) -> bool:
+    def is_authorized(
+        self, handler: JupyterHandler, user: User, action: str, resource: str
+    ) -> bool:
         """This method always returns True.
 
         All authenticated users are allowed to do anything in the Jupyter Server.

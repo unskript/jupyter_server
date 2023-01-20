@@ -3,10 +3,10 @@
 # Distributed under the terms of the Modified BSD License.
 from tornado import web
 
-from . import csp_report_uri
-from ...base.handlers import APIHandler
 from jupyter_server.auth import authorized
 
+from ...base.handlers import APIHandler
+from . import csp_report_uri
 
 AUTH_RESOURCE = "csp"
 
@@ -22,7 +22,7 @@ class CSPReportHandler(APIHandler):
         return True
 
     def check_xsrf_cookie(self):
-        # don't check XSRF for CSP reports
+        """Don't check XSRF for CSP reports."""
         return
 
     @web.authenticated

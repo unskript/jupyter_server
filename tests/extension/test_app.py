@@ -1,9 +1,14 @@
+import json
+from io import StringIO
+from logging import StreamHandler
+from typing import Any
+
 import pytest
 from traitlets.config import Config
 
-from .mockextensions.app import MockExtensionApp
 from jupyter_server.serverapp import ServerApp
-from jupyter_server.utils import run_sync
+
+from .mockextensions.app import MockExtensionApp
 
 
 @pytest.fixture
@@ -77,7 +82,7 @@ def test_extensionapp_no_parent():
     assert app.serverapp is not None
 
 
-OPEN_BROWSER_COMBINATIONS = (
+OPEN_BROWSER_COMBINATIONS: Any = (
     (True, {}),
     (True, {"ServerApp": {"open_browser": True}}),
     (False, {"ServerApp": {"open_browser": False}}),
@@ -115,12 +120,12 @@ OPEN_BROWSER_COMBINATIONS = (
 
 
 @pytest.mark.parametrize("expected_value, config", OPEN_BROWSER_COMBINATIONS)
-def test_browser_open(monkeypatch, jp_environ, config, expected_value):
+async def test_browser_open(monkeypatch, jp_environ, config, expected_value):
     serverapp = MockExtensionApp.initialize_server(config=Config(config))
     assert serverapp.open_browser == expected_value
 
 
-def test_load_parallel_extensions(monkeypatch, jp_environ):
+async def test_load_parallel_extensions(monkeypatch, jp_environ):
     serverapp = MockExtensionApp.initialize_server()
     exts = serverapp.extension_manager.extensions
     assert "tests.extension.mockextensions.mock1" in exts
@@ -131,7 +136,7 @@ def test_load_parallel_extensions(monkeypatch, jp_environ):
     assert exts["tests.extension.mockextensions"]
 
 
-def test_stop_extension(jp_serverapp, caplog):
+async def test_stop_extension(jp_serverapp, caplog):
     """Test the stop_extension method.
 
     This should be fired by ServerApp.cleanup_extensions.
@@ -139,9 +144,11 @@ def test_stop_extension(jp_serverapp, caplog):
     calls = 0
 
     # load extensions (make sure we only have the one extension loaded
+    # as well as
     jp_serverapp.extension_manager.load_all_extensions()
     extension_name = "tests.extension.mockextensions"
-    assert list(jp_serverapp.extension_manager.extension_apps) == [extension_name]
+    apps = set(jp_serverapp.extension_manager.extension_apps)
+    assert apps == {"jupyter_server_terminals", extension_name}
 
     # add a stop_extension method for the extension app
     async def _stop(*args):
@@ -155,12 +162,29 @@ def test_stop_extension(jp_serverapp, caplog):
 
     # call cleanup_extensions, check the logging is correct
     caplog.clear()
-    run_sync(jp_serverapp.cleanup_extensions())
-    assert [msg for *_, msg in caplog.record_tuples] == [
-        "Shutting down 1 extension",
-        '{} | extension app "mockextension" stopping'.format(extension_name),
-        '{} | extension app "mockextension" stopped'.format(extension_name),
-    ]
+    await jp_serverapp.cleanup_extensions()
+    assert {msg for *_, msg in caplog.record_tuples} == {
+        "Shutting down 2 extensions",
+        "jupyter_server_terminals | extension app 'jupyter_server_terminals' stopping",
+        f"{extension_name} | extension app 'mockextension' stopping",
+        "jupyter_server_terminals | extension app 'jupyter_server_terminals' stopped",
+        f"{extension_name} | extension app 'mockextension' stopped",
+    }
 
-    # check the shutdown method was called once
-    assert calls == 1
+    # check the shutdown method was called twice
+    assert calls == 2
+
+
+async def test_events(jp_serverapp, jp_fetch):
+    stream = StringIO()
+    handler = StreamHandler(stream)
+    jp_serverapp.event_logger.register_handler(handler)
+
+    await jp_fetch("mock")
+
+    handler.flush()
+    output = json.loads(stream.getvalue())
+    # Clear the sink.
+    stream.truncate(0)
+    stream.seek(0)
+    assert output["msg"] == "Hello, world!"

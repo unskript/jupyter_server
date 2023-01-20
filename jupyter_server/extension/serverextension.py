@@ -1,21 +1,18 @@
-# coding: utf-8
 """Utilities for installing extensions"""
 # Copyright (c) Jupyter Development Team.
 # Distributed under the terms of the Modified BSD License.
+import logging
 import os
 import sys
 
 from jupyter_core.application import JupyterApp
-from jupyter_core.paths import ENV_CONFIG_PATH
-from jupyter_core.paths import jupyter_config_dir
-from jupyter_core.paths import SYSTEM_CONFIG_PATH
+from jupyter_core.paths import ENV_CONFIG_PATH, SYSTEM_CONFIG_PATH, jupyter_config_dir
 from tornado.log import LogFormatter
 from traitlets import Bool
 
 from jupyter_server._version import __version__
 from jupyter_server.extension.config import ExtensionConfigManager
-from jupyter_server.extension.manager import ExtensionManager
-from jupyter_server.extension.manager import ExtensionPackage
+from jupyter_server.extension.manager import ExtensionManager, ExtensionPackage
 
 
 def _get_config_dir(user=False, sys_prefix=False):
@@ -120,7 +117,7 @@ _base_aliases.update(JupyterApp.aliases)
 class BaseExtensionApp(JupyterApp):
     """Base extension installer app"""
 
-    _log_formatter_cls = LogFormatter
+    _log_formatter_cls = LogFormatter  # type:ignore[assignment]
     flags = _base_flags
     aliases = _base_aliases
     version = __version__
@@ -216,11 +213,14 @@ flags.update(
 flags["python"] = flags["py"]
 
 
+_desc = "Enable/disable a server extension using frontend configuration files."
+
+
 class ToggleServerExtensionApp(BaseExtensionApp):
     """A base class for enabling/disabling extensions"""
 
     name = "jupyter server extension enable/disable"
-    description = "Enable/disable a server extension using frontend configuration files."
+    description = _desc
 
     flags = flags
 
@@ -245,15 +245,15 @@ class ToggleServerExtensionApp(BaseExtensionApp):
             user=self.user, sys_prefix=self.sys_prefix
         )
         try:
-            self.log.info("{}: {}".format(self._toggle_pre_message.capitalize(), import_name))
-            self.log.info("- Writing config: {}".format(config_dir))
+            self.log.info(f"{self._toggle_pre_message.capitalize()}: {import_name}")
+            self.log.info(f"- Writing config: {config_dir}")
             # Validate the server extension.
-            self.log.info("    - Validating {}...".format(import_name))
+            self.log.info(f"    - Validating {import_name}...")
             # Interface with the Extension Package and validate.
             extpkg = ExtensionPackage(name=import_name)
             extpkg.validate()
             version = extpkg.version
-            self.log.info("      {} {} {}".format(import_name, version, GREEN_OK))
+            self.log.info(f"      {import_name} {version} {GREEN_OK}")
 
             # Toggle extension config.
             config = extension_manager.config_manager
@@ -263,9 +263,9 @@ class ToggleServerExtensionApp(BaseExtensionApp):
                 config.disable(import_name)
 
             # If successful, let's log.
-            self.log.info("    - Extension successfully {}.".format(self._toggle_post_message))
+            self.log.info(f"    - Extension successfully {self._toggle_post_message}.")
         except Exception as err:
-            self.log.info("     {} Validation failed: {}".format(RED_X, err))
+            self.log.info(f"     {RED_X} Validation failed: {err}")
 
     def start(self):
         """Perform the App's actions as configured"""
@@ -285,7 +285,7 @@ class EnableServerExtensionApp(ToggleServerExtensionApp):
     Usage
         jupyter server extension enable [--system|--sys-prefix]
     """
-    _toggle_value = True
+    _toggle_value = True  # type:ignore[assignment]
     _toggle_pre_message = "enabling"
     _toggle_post_message = "enabled"
 
@@ -300,7 +300,7 @@ class DisableServerExtensionApp(ToggleServerExtensionApp):
     Usage
         jupyter server extension disable [--system|--sys-prefix]
     """
-    _toggle_value = False
+    _toggle_value = False  # type:ignore[assignment]
     _toggle_pre_message = "disabling"
     _toggle_post_message = "disabled"
 
@@ -324,20 +324,30 @@ class ListServerExtensionsApp(BaseExtensionApp):
         )
 
         for option in configurations:
-            config_dir, ext_manager = _get_extmanager_for_context(**option)
-            self.log.info("Config dir: {}".format(config_dir))
-            for name, extension in ext_manager.extensions.items():
-                enabled = extension.enabled
+            config_dir = _get_config_dir(**option)
+            self.log.info(f"Config dir: {config_dir}")
+            write_dir = "jupyter_server_config.d"
+            config_manager = ExtensionConfigManager(
+                read_config_path=[config_dir],
+                write_config_dir=os.path.join(config_dir, write_dir),
+            )
+            jpserver_extensions = config_manager.get_jpserver_extensions()
+            for name, enabled in jpserver_extensions.items():
                 # Attempt to get extension metadata
-                self.log.info("    {} {}".format(name, GREEN_ENABLED if enabled else RED_DISABLED))
+                self.log.info(f"    {name} {GREEN_ENABLED if enabled else RED_DISABLED}")
                 try:
-                    self.log.info("    - Validating {}...".format(name))
+                    self.log.info(f"    - Validating {name}...")
+                    extension = ExtensionPackage(name=name, enabled=enabled)
                     if not extension.validate():
-                        raise ValueError("validation failed")
+                        msg = "validation failed"
+                        raise ValueError(msg)
                     version = extension.version
-                    self.log.info("      {} {} {}".format(name, version, GREEN_OK))
+                    self.log.info(f"      {name} {version} {GREEN_OK}")
                 except Exception as err:
-                    self.log.warning("      {} {}".format(RED_X, err))
+                    exc_info = False
+                    if int(self.log_level) <= logging.DEBUG:
+                        exc_info = True
+                    self.log.warning(f"      {RED_X} {err}", exc_info=exc_info)
             # Add a blank line between paths.
             self.log.info("")
 
@@ -358,18 +368,18 @@ class ServerExtensionApp(BaseExtensionApp):
 
     name = "jupyter server extension"
     version = __version__
-    description = "Work with Jupyter server extensions"
+    description: str = "Work with Jupyter server extensions"
     examples = _examples
 
-    subcommands = dict(
-        enable=(EnableServerExtensionApp, "Enable a server extension"),
-        disable=(DisableServerExtensionApp, "Disable a server extension"),
-        list=(ListServerExtensionsApp, "List server extensions"),
-    )
+    subcommands: dict = {
+        "enable": (EnableServerExtensionApp, "Enable a server extension"),
+        "disable": (DisableServerExtensionApp, "Disable a server extension"),
+        "list": (ListServerExtensionsApp, "List server extensions"),
+    }
 
     def start(self):
         """Perform the App's actions as configured"""
-        super(ServerExtensionApp, self).start()
+        super().start()
 
         # The above should have called a subcommand and raised NoStart; if we
         # get here, it didn't, so we should self.log.info a message.

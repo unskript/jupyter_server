@@ -1,7 +1,6 @@
 """The Jupyter Server"""
 import os
-import subprocess
-import sys
+import pathlib
 
 DEFAULT_STATIC_FILES_PATH = os.path.join(os.path.dirname(__file__), "static")
 DEFAULT_TEMPLATE_PATH_LIST = [
@@ -10,20 +9,13 @@ DEFAULT_TEMPLATE_PATH_LIST = [
 ]
 
 DEFAULT_JUPYTER_SERVER_PORT = 8888
+JUPYTER_SERVER_EVENTS_URI = "https://events.jupyter.org/jupyter_server"
+DEFAULT_EVENTS_SCHEMA_PATH = pathlib.Path(__file__).parent / "event_schemas"
 
 del os
 
-from ._version import version_info, __version__  # noqa
+from ._version import __version__, version_info  # noqa
 
 
 def _cleanup():
     pass
-
-
-# patch subprocess on Windows for python<3.7
-# see https://bugs.python.org/issue37380
-# the fix for python3.7: https://github.com/python/cpython/pull/15706/files
-if sys.platform == "win32":
-    if sys.version_info < (3, 7):
-        subprocess._cleanup = _cleanup
-        subprocess._active = None

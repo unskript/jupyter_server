@@ -1,1 +1,2 @@
-c.SimpleApp11.ignore_js = True
+"""Jupyter server config."""
+c.SimpleApp11.ignore_js = True  # type:ignore[name-defined]

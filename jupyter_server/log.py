@@ -1,3 +1,4 @@
+"""Log utilities."""
 # -----------------------------------------------------------------------------
 #  Copyright (c) Jupyter Development Team
 #
@@ -8,6 +9,7 @@ import json
 
 from tornado.log import access_log
 
+from .auth import User
 from .prometheus.log_functions import prometheus_log_method
 
 
@@ -37,14 +39,30 @@ def log_request(handler):
         log_method = logger.error
 
     request_time = 1000.0 * handler.request.request_time()
-    ns = dict(
-        status=status,
-        method=request.method,
-        ip=request.remote_ip,
-        uri=request.uri,
-        request_time=request_time,
-    )
-    msg = "{status} {method} {uri} ({ip}) {request_time:.2f}ms"
+    ns = {
+        "status": status,
+        "method": request.method,
+        "ip": request.remote_ip,
+        "uri": request.uri,
+        "request_time": request_time,
+    }
+    # log username
+    # make sure we don't break anything
+    # in case mixins cause current_user to not be a User somehow
+    try:
+        user = handler.current_user
+    except Exception:
+        user = None
+    if user:
+        if isinstance(user, User):
+            username = user.username
+        else:
+            username = "unknown"
+    else:
+        username = ""
+    ns["username"] = username
+
+    msg = "{status} {method} {uri} ({username}@{ip}) {request_time:.2f}ms"
     if status >= 400:
         # log bad referers
         ns["referer"] = request.headers.get("Referer", "None")

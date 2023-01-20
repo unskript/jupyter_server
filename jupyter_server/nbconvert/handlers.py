@@ -7,16 +7,14 @@ import sys
 import zipfile
 
 from anyio.to_thread import run_sync
+from jupyter_core.utils import ensure_async
 from nbformat import from_dict
 from tornado import web
 from tornado.log import app_log
 
-from ..base.handlers import FilesRedirectHandler
-from ..base.handlers import JupyterHandler
-from ..base.handlers import path_regex
 from jupyter_server.auth import authorized
-from jupyter_server.utils import ensure_async
 
+from ..base.handlers import FilesRedirectHandler, JupyterHandler, path_regex
 
 AUTH_RESOURCE = "nbconvert"
 
@@ -29,6 +27,7 @@ else:
 
 
 def find_resource_files(output_files_dir):
+    """Find the resource files in a directory."""
     files = []
     for dirpath, _, filenames in os.walk(output_files_dir):
         files.extend([os.path.join(dirpath, f) for f in filenames])
@@ -69,7 +68,7 @@ def get_exporter(format, **kwargs):
     """get an exporter, raising appropriate errors"""
     # if this fails, will raise 500
     try:
-        from nbconvert.exporters.base import get_exporter
+        from nbconvert.exporters.base import get_exporter  # type:ignore
     except ImportError as e:
         raise web.HTTPError(500, "Could not import nbconvert: %s" % e) from e
 
@@ -87,13 +86,15 @@ def get_exporter(format, **kwargs):
 
 
 class NbconvertFileHandler(JupyterHandler):
+    """An nbconvert file handler."""
 
     auth_resource = AUTH_RESOURCE
-    SUPPORTED_METHODS = ("GET",)
+    SUPPORTED_METHODS = ("GET",)  # type:ignore[assignment]
 
     @web.authenticated
     @authorized
     async def get(self, format, path):
+        """Get a notebook file in a desired format."""
         self.check_xsrf_cookie()
         exporter = get_exporter(format, config=self.config, log=self.log)
 
@@ -154,13 +155,15 @@ class NbconvertFileHandler(JupyterHandler):
 
 
 class NbconvertPostHandler(JupyterHandler):
+    """An nbconvert post handler."""
 
-    SUPPORTED_METHODS = ("POST",)
+    SUPPORTED_METHODS = ("POST",)  # type:ignore[assignment]
     auth_resource = AUTH_RESOURCE
 
     @web.authenticated
     @authorized
     async def post(self, format):
+        """Convert a notebook file to a desired format."""
         exporter = get_exporter(format, config=self.config)
 
         model = self.get_json_body()
@@ -199,5 +202,5 @@ _format_regex = r"(?P<format>\w+)"
 
 default_handlers = [
     (r"/nbconvert/%s" % _format_regex, NbconvertPostHandler),
-    (r"/nbconvert/%s%s" % (_format_regex, path_regex), NbconvertFileHandler),
+    (rf"/nbconvert/{_format_regex}{path_regex}", NbconvertFileHandler),
 ]

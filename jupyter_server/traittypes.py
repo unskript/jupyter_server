@@ -1,14 +1,15 @@
+"""Custom trait types."""
 import inspect
 from ast import literal_eval
 
-from traitlets import ClassBasedTraitType
-from traitlets import TraitError
-from traitlets import Undefined
+from traitlets import Any, ClassBasedTraitType, TraitError, Undefined
 from traitlets.utils.descriptions import describe
 
 
 class TypeFromClasses(ClassBasedTraitType):
     """A trait whose value must be a subclass of a class in a specified list of classes."""
+
+    default_value: Any
 
     def __init__(self, default_value=Undefined, klasses=None, **kwargs):
         """Construct a Type trait
@@ -44,11 +45,13 @@ class TypeFromClasses(ClassBasedTraitType):
 
         # OneOfType requires a list of klasses to be specified (different than Type).
         if not isinstance(klasses, (list, tuple, set)):
-            raise TraitError("`klasses` must be a list of class names (type is str) or classes.")
+            msg = "`klasses` must be a list of class names (type is str) or classes."
+            raise TraitError(msg)
 
         for klass in klasses:
             if not (inspect.isclass(klass) or isinstance(klass, str)):
-                raise TraitError("A OneOfType trait must specify a list of classes.")
+                msg = "A OneOfType trait must specify a list of classes."
+                raise TraitError(msg)
 
         # Store classes.
         self.klasses = klasses
@@ -56,7 +59,7 @@ class TypeFromClasses(ClassBasedTraitType):
         super().__init__(new_default_value, **kwargs)
 
     def subclass_from_klasses(self, value):
-        "Check that a given class is a subclasses found in the klasses list."
+        """Check that a given class is a subclasses found in the klasses list."""
         return any(issubclass(value, klass) for klass in self.importable_klasses)
 
     def validate(self, obj, value):
@@ -64,11 +67,11 @@ class TypeFromClasses(ClassBasedTraitType):
         if isinstance(value, str):
             try:
                 value = self._resolve_string(value)
-            except ImportError:
+            except ImportError as e:
                 raise TraitError(
                     "The '%s' trait of %s instance must be a type, but "
                     "%r could not be imported" % (self.name, obj, value)
-                )
+                ) from e
         try:
             if self.subclass_from_klasses(value):
                 return value
@@ -91,11 +94,12 @@ class TypeFromClasses(ClassBasedTraitType):
         return result
 
     def instance_init(self, obj):
+        """Initialize an instance."""
         self._resolve_classes()
         super().instance_init(obj)
 
     def _resolve_classes(self):
-        # Resolve all string names to actual classes.
+        """Resolve all string names to actual classes."""
         self.importable_klasses = []
         for klass in self.klasses:
             if isinstance(klass, str):
@@ -112,6 +116,7 @@ class TypeFromClasses(ClassBasedTraitType):
             self.default_value = self._resolve_string(self.default_value)
 
     def default_value_repr(self):
+        """The default value repr."""
         value = self.default_value
         if isinstance(value, str):
             return repr(value)
@@ -162,27 +167,32 @@ class InstanceFromClasses(ClassBasedTraitType):
             )
 
         if (kw is not None) and not isinstance(kw, dict):
-            raise TraitError("The 'kw' argument must be a dict or None.")
+            msg = "The 'kw' argument must be a dict or None."
+            raise TraitError(msg)
         if (args is not None) and not isinstance(args, tuple):
-            raise TraitError("The 'args' argument must be a tuple or None.")
+            msg = "The 'args' argument must be a tuple or None."
+            raise TraitError(msg)
 
         self.default_args = args
         self.default_kwargs = kw
 
-        super(InstanceFromClasses, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def instance_from_importable_klasses(self, value):
-        "Check that a given class is a subclasses found in the klasses list."
+        """Check that a given class is a subclasses found in the klasses list."""
         return any(isinstance(value, klass) for klass in self.importable_klasses)
 
     def validate(self, obj, value):
+        """Validate an instance."""
         if self.instance_from_importable_klasses(value):
             return value
         else:
             self.error(obj, value)
 
     def info(self):
+        """Get the trait info."""
         result = "an instance of "
+        assert self.klasses is not None
         for klass in self.klasses:
             if isinstance(klass, str):
                 result += klass
@@ -195,12 +205,14 @@ class InstanceFromClasses(ClassBasedTraitType):
         return result
 
     def instance_init(self, obj):
+        """Initialize the trait."""
         self._resolve_classes()
         super().instance_init(obj)
 
     def _resolve_classes(self):
-        # Resolve all string names to actual classes.
+        """Resolve all string names to actual classes."""
         self.importable_klasses = []
+        assert self.klasses is not None
         for klass in self.klasses:
             if isinstance(klass, str):
                 # Try importing the classes to compare. Silently, ignore if not importable.
@@ -213,12 +225,17 @@ class InstanceFromClasses(ClassBasedTraitType):
                 self.importable_klasses.append(klass)
 
     def make_dynamic_default(self):
+        """Make the dynamic default for the trait."""
         if (self.default_args is None) and (self.default_kwargs is None):
             return None
-        return self.klass(*(self.default_args or ()), **(self.default_kwargs or {}))
+        return self.klass(  # type:ignore[attr-defined]
+            *(self.default_args or ()), **(self.default_kwargs or {})
+        )
 
     def default_value_repr(self):
+        """Get the default value repr."""
         return repr(self.make_dynamic_default())
 
     def from_string(self, s):
+        """Convert from a string."""
         return literal_eval(s)

@@ -24,10 +24,10 @@ The development version of the server requires `node <https://nodejs.org/en/down
 Once you have installed the dependencies mentioned above, use the following
 steps::
 
-    pip install --upgrade setuptools pip
+    pip install --upgrade pip
     git clone https://github.com/jupyter/jupyter_server
     cd jupyter_server
-    pip install -e .
+    pip install -e ".[test]"
 
 If you are using a system-wide Python installation and you only want to install the server for you,
 you can add ``--user`` to the install commands.
@@ -38,15 +38,17 @@ from any directory in your system with::
     jupyter server
 
 
-Code Styling
------------------------------
+Code Styling and Quality Checks
+-------------------------------
 `jupyter_server` has adopted automatic code formatting so you shouldn't
 need to worry too much about your code style.
 As long as your code is valid,
 the pre-commit hook should take care of how it should look.
-To install `pre-commit`, run the following::
+`pre-commit` and its associated hooks will automatically be installed when
+you run ``pip install -e ".[test]"``
 
-    pip install pre-commit
+To install ``pre-commit`` hook manually, run the following::
+
     pre-commit install
 
 
@@ -56,13 +58,21 @@ You can invoke the pre-commit hook by hand at any time with::
 
 which should run any autoformatting on your code
 and tell you about any errors it couldn't fix automatically.
-You may also install [black integration](https://github.com/psf/black#editor-integration)
+You may also install `black integration <https://github.com/psf/black#editor-integration>`_
 into your text editor to format code automatically.
 
 If you have already committed files before setting up the pre-commit
 hook with ``pre-commit install``, you can fix everything up using
 ``pre-commit run --all-files``. You need to make the fixing commit
 yourself after that.
+
+Some of the hooks only run on CI by default, but you can invoke them by
+running with the ``--hook-stage manual`` argument.
+
+There are three hatch scripts that can be run locally as well:
+``hatch run lint:style`` will check styling.  ``hatch run lint:fmt``
+will attempt to auto-format files.  ``hatch run typing:test`` will
+run the type checker.
 
 Troubleshooting the Installation
 --------------------------------
@@ -72,9 +82,9 @@ running other instances of Jupyter Server. You can try the following steps:
 
 1. Uninstall all instances of the jupyter_server package. These include any installations you made using
    pip or conda
-2. Run ``python3 -m pip install -e .`` in the jupyter_server repository to install the jupyter_server from there
+2. Run ``python -m pip install -e .`` in the jupyter_server repository to install the jupyter_server from there
 3. Run ``npm run build`` to make sure the Javascript and CSS are updated and compiled
-4. Launch with ``python3 -m jupyter_server --port 8989``, and check that the browser is pointing to ``localhost:8989``
+4. Launch with ``python -m jupyter_server --port 8989``, and check that the browser is pointing to ``localhost:8989``
    (rather than the default 8888). You don't necessarily have to launch with port 8989, as long as you use
    a port that is neither the default nor in use, then it should be fine.
 5. Verify the installation with the steps in the previous section.
@@ -92,37 +102,43 @@ To run the Python tests, use::
     pytest
     pytest examples/simple  # to test the examples
 
+You can also run the tests using ``hatch`` without installing test dependencies in your local environment::
+
+    pip install hatch
+    hatch run test:test
+
+The command takes any argument that you can give to ``pytest``, e.g.::
+
+    hatch run test:test -k name_of_method_to_test
+
+You can also drop into a shell in the test environment by running::
+
+    hatch -e test shell
+
 Building the Docs
 =================
 
-To build the documentation you'll need `Sphinx <http://www.sphinx-doc.org/en/master/>`_,
-`pandoc <https://pandoc.org/>`_ and a few other packages.
+Install the docs requirements using ``pip``::
 
-To install (and activate) a `conda environment`_ named ``server_docs``
-containing all the necessary packages (except pandoc), use::
-
-    conda env create -f docs/environment.yml
-    source activate server_docs  # Linux and OS X
-    activate server_docs         # Windows
-
-.. _conda environment:
-    https://conda.io/projects/conda/en/latest/user-guide/tasks/manage-environments.html#creating-an-environment-from-an-environment-yml-file
-
-If you want to install the necessary packages with ``pip`` instead::
-
-    pip install -r docs/doc-requirements.txt
+    pip install .[doc]
 
 Once you have installed the required packages, you can build the docs with::
 
     cd docs
     make html
 
+You can also run the tests using ``hatch`` without installing test dependencies
+in your local environment.
+
+    pip install hatch
+    hatch run docs:build
+
+You can also drop into a shell in the docs environment by running::
+
+    hatch -e docs shell
+
 After that, the generated HTML files will be available at
 ``build/html/index.html``. You may view the docs in your browser.
-
-You can automatically check if all hyperlinks are still valid::
-
-    make linkcheck
 
 Windows users can find ``make.bat`` in the ``docs`` folder.
 

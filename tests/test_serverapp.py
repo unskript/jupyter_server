@@ -2,6 +2,7 @@ import getpass
 import logging
 import os
 import pathlib
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -10,9 +11,23 @@ from traitlets import TraitError
 from traitlets.tests.utils import check_help_all_output
 
 from jupyter_server.auth.security import passwd_check
-from jupyter_server.serverapp import JupyterPasswordApp
-from jupyter_server.serverapp import list_running_servers
-from jupyter_server.serverapp import ServerApp
+from jupyter_server.serverapp import (
+    JupyterPasswordApp,
+    ServerApp,
+    ServerWebApplication,
+    list_running_servers,
+    random_ports,
+)
+from jupyter_server.services.contents.filemanager import (
+    AsyncFileContentsManager,
+    FileContentsManager,
+)
+from jupyter_server.utils import pathname2url, urljoin
+
+
+@pytest.fixture(params=[FileContentsManager, AsyncFileContentsManager])
+def jp_file_contents_manager_class(request, tmp_path):
+    return request.param
 
 
 def test_help_output():
@@ -79,7 +94,7 @@ def test_valid_root_dir(valid_root_dir, jp_configurable_serverapp):
     assert app.root_dir == root_dir
 
 
-def test_generate_config(tmp_path, jp_configurable_serverapp):
+async def test_generate_config(tmp_path, jp_configurable_serverapp):
     app = jp_configurable_serverapp(config_dir=str(tmp_path))
     app.initialize(["--generate-config", "--allow-root"])
     with pytest.raises(NoStart):
@@ -97,8 +112,8 @@ def test_server_password(tmp_path, jp_configurable_serverapp):
         app.start()
         sv = jp_configurable_serverapp()
         sv.load_config_file()
-        assert sv.password != ""
-        passwd_check(sv.password, password)
+        assert sv.identity_provider.hashed_password != ""
+        passwd_check(sv.identity_provider.hashed_password, password)
 
 
 def test_list_running_servers(jp_serverapp, jp_web_app):
@@ -229,18 +244,26 @@ def test_resolve_file_to_run_and_root_dir(prefix_path, root_dir, file_to_run, ex
             "http+unix://%2Ftmp%2Fjp-test.sock/test/?token=<generated>",
             "http+unix://%2Ftmp%2Fjp-test.sock/",
         ),
+        (
+            {"ip": ""},
+            "http://localhost:8888/?token=<generated>",
+            "http://127.0.0.1:8888/?token=<generated>",
+            "http://localhost:8888/",
+        ),
     ],
 )
 def test_urls(config, public_url, local_url, connection_url):
     # Verify we're working with a clean instance.
     ServerApp.clear_instance()
     serverapp = ServerApp.instance(**config)
+    serverapp.init_configurables()
+    token = serverapp.identity_provider.token
     # If a token is generated (not set by config), update
     # expected_url with token.
-    if serverapp._token_generated:
-        public_url = public_url.replace("<generated>", serverapp.token)
-        local_url = local_url.replace("<generated>", serverapp.token)
-        connection_url = connection_url.replace("<generated>", serverapp.token)
+    if serverapp.identity_provider.token_generated:
+        public_url = public_url.replace("<generated>", token)
+        local_url = local_url.replace("<generated>", token)
+        connection_url = connection_url.replace("<generated>", token)
     assert serverapp.public_url == public_url
     assert serverapp.local_url == local_url
     assert serverapp.connection_url == connection_url
@@ -250,14 +273,18 @@ def test_urls(config, public_url, local_url, connection_url):
 
 # Preferred dir tests
 # ----------------------------------------------------------------------------
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_valid_preferred_dir(tmp_path, jp_configurable_serverapp):
     path = str(tmp_path)
     app = jp_configurable_serverapp(root_dir=path, preferred_dir=path)
     assert app.root_dir == path
     assert app.preferred_dir == path
     assert app.root_dir == app.preferred_dir
+    assert app.contents_manager.root_dir == path
+    assert app.contents_manager.preferred_dir == ""
 
 
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_valid_preferred_dir_is_root_subdir(tmp_path, jp_configurable_serverapp):
     path = str(tmp_path)
     path_subdir = str(tmp_path / "subdir")
@@ -266,15 +293,112 @@ def test_valid_preferred_dir_is_root_subdir(tmp_path, jp_configurable_serverapp)
     assert app.root_dir == path
     assert app.preferred_dir == path_subdir
     assert app.preferred_dir.startswith(app.root_dir)
+    assert app.contents_manager.preferred_dir == "subdir"
 
 
 def test_valid_preferred_dir_does_not_exist(tmp_path, jp_configurable_serverapp):
     path = str(tmp_path)
     path_subdir = str(tmp_path / "subdir")
     with pytest.raises(TraitError) as error:
-        app = jp_configurable_serverapp(root_dir=path, preferred_dir=path_subdir)
+        jp_configurable_serverapp(root_dir=path, preferred_dir=path_subdir)
 
     assert "No such preferred dir:" in str(error)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_preferred_dir_validation_sync_regression(
+    tmp_path, jp_configurable_serverapp, jp_file_contents_manager_class
+):
+    path = str(tmp_path)
+    path_subdir = str(tmp_path / "subdir")
+    os.makedirs(path_subdir, exist_ok=True)
+    app = jp_configurable_serverapp(
+        root_dir=path,
+        contents_manager_class=jp_file_contents_manager_class,
+    )
+    app.contents_manager.preferred_dir = path_subdir
+    assert app.preferred_dir == path_subdir
+    assert app.preferred_dir.startswith(app.root_dir)
+    assert app.contents_manager.preferred_dir == "subdir"
+
+
+# This tests some deprecated behavior as well
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.parametrize(
+    "root_dir_loc,preferred_dir_loc,config_target",
+    [
+        ("cli", "cli", "ServerApp"),
+        ("cli", "cli", "FileContentsManager"),
+        ("cli", "config", "ServerApp"),
+        ("cli", "config", "FileContentsManager"),
+        ("cli", "default", "ServerApp"),
+        ("cli", "default", "FileContentsManager"),
+        ("config", "cli", "ServerApp"),
+        ("config", "cli", "FileContentsManager"),
+        ("config", "config", "ServerApp"),
+        ("config", "config", "FileContentsManager"),
+        ("config", "default", "ServerApp"),
+        ("config", "default", "FileContentsManager"),
+        ("default", "cli", "ServerApp"),
+        ("default", "cli", "FileContentsManager"),
+        ("default", "config", "ServerApp"),
+        ("default", "config", "FileContentsManager"),
+        ("default", "default", "ServerApp"),
+        ("default", "default", "FileContentsManager"),
+    ],
+)
+def test_preferred_dir_validation(
+    root_dir_loc,
+    preferred_dir_loc,
+    config_target,
+    tmp_path,
+    jp_config_dir,
+    jp_configurable_serverapp,
+):
+    expected_root_dir = str(tmp_path)
+
+    os_preferred_dir = str(tmp_path / "subdir")
+    os.makedirs(os_preferred_dir, exist_ok=True)
+    config_preferred_dir = os_preferred_dir if config_target == "ServerApp" else "subdir"
+    config_preferred_dir = config_preferred_dir + "/"  # add trailing slash to ensure it is removed
+    expected_preferred_dir = "subdir"
+
+    argv = []
+    kwargs = {"root_dir": None}
+
+    config_lines = []
+    config_file = None
+    if root_dir_loc == "config" or preferred_dir_loc == "config":
+        config_file = jp_config_dir.joinpath("jupyter_server_config.py")
+
+    if root_dir_loc == "cli":
+        argv.append(f"--{config_target}.root_dir={expected_root_dir}")
+    if root_dir_loc == "config":
+        config_lines.append(f'c.{config_target}.root_dir = r"{expected_root_dir}"')
+    if root_dir_loc == "default":
+        expected_root_dir = os.getcwd()
+
+    if preferred_dir_loc == "cli":
+        argv.append(f"--{config_target}.preferred_dir={config_preferred_dir}")
+    if preferred_dir_loc == "config":
+        config_lines.append(f'c.{config_target}.preferred_dir = r"{config_preferred_dir}"')
+    if preferred_dir_loc == "default":
+        expected_preferred_dir = ""
+
+    if config_file is not None:
+        config_file.write_text("\n".join(config_lines))
+
+    if argv:
+        kwargs["argv"] = argv  # type:ignore
+
+    if root_dir_loc == "default" and preferred_dir_loc != "default":  # error expected
+        with pytest.raises(SystemExit):
+            jp_configurable_serverapp(**kwargs)
+    else:
+        app = jp_configurable_serverapp(**kwargs)
+        assert app.contents_manager.root_dir == expected_root_dir
+        assert app.contents_manager.preferred_dir == expected_preferred_dir
+        assert ".." not in expected_preferred_dir
 
 
 def test_invalid_preferred_dir_does_not_exist(tmp_path, jp_configurable_serverapp):
@@ -297,42 +421,124 @@ def test_invalid_preferred_dir_does_not_exist_set(tmp_path, jp_configurable_serv
     assert "No such preferred dir:" in str(error)
 
 
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_invalid_preferred_dir_not_root_subdir(tmp_path, jp_configurable_serverapp):
     path = str(tmp_path / "subdir")
     os.makedirs(path, exist_ok=True)
     not_subdir_path = str(tmp_path)
 
+    with pytest.raises(SystemExit):
+        jp_configurable_serverapp(root_dir=path, preferred_dir=not_subdir_path)
+
+
+async def test_invalid_preferred_dir_not_root_subdir_set(tmp_path, jp_configurable_serverapp):
+    path = str(tmp_path / "subdir")
+    os.makedirs(path, exist_ok=True)
+    not_subdir_path = os.path.relpath(tmp_path, path)
+
+    app = jp_configurable_serverapp(root_dir=path)
     with pytest.raises(TraitError) as error:
-        app = jp_configurable_serverapp(root_dir=path, preferred_dir=not_subdir_path)
+        app.contents_manager.preferred_dir = not_subdir_path
 
-    assert "preferred_dir must be equal or a subdir of root_dir:" in str(error)
+    assert "is outside root contents directory" in str(error.value)
 
 
-def test_invalid_preferred_dir_not_root_subdir_set(tmp_path, jp_configurable_serverapp):
+async def test_absolute_preferred_dir_not_root_subdir_set(tmp_path, jp_configurable_serverapp):
     path = str(tmp_path / "subdir")
     os.makedirs(path, exist_ok=True)
     not_subdir_path = str(tmp_path)
 
     app = jp_configurable_serverapp(root_dir=path)
+
     with pytest.raises(TraitError) as error:
-        app.preferred_dir = not_subdir_path
+        app.contents_manager.preferred_dir = not_subdir_path
 
-    assert "preferred_dir must be equal or a subdir of root_dir:" in str(error)
-
-
-def test_observed_root_dir_updates_preferred_dir(tmp_path, jp_configurable_serverapp):
-    path = str(tmp_path)
-    new_path = str(tmp_path / "subdir")
-    os.makedirs(new_path, exist_ok=True)
-
-    app = jp_configurable_serverapp(root_dir=path, preferred_dir=path)
-    app.root_dir = new_path
-    assert app.preferred_dir == new_path
+    if os.name == "nt":
+        assert "is not a relative API path" in str(error.value)
+    else:
+        assert "Preferred directory not found" in str(error.value)
 
 
-def test_observed_root_dir_does_not_update_preferred_dir(tmp_path, jp_configurable_serverapp):
-    path = str(tmp_path)
-    new_path = str(tmp_path.parent)
-    app = jp_configurable_serverapp(root_dir=path, preferred_dir=path)
-    app.root_dir = new_path
-    assert app.preferred_dir == path
+def test_random_ports():
+    ports = list(random_ports(500, 50))
+    assert len(ports) == 50
+
+
+def test_server_web_application(jp_serverapp):
+    server: ServerApp = jp_serverapp
+    server.default_url = "/foo"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        app = ServerWebApplication(
+            server,
+            [],
+            server.kernel_manager,
+            server.contents_manager,
+            server.session_manager,
+            server.kernel_manager,
+            server.config_manager,
+            server.event_logger,
+            ["jupyter_server.gateway.handlers"],
+            server.log,
+            server.base_url,
+            server.default_url,
+            {},
+            {},
+        )
+    app.init_handlers([], app.settings)
+
+
+def test_misc(jp_serverapp, tmp_path):
+    app: ServerApp = jp_serverapp
+    assert app.terminals_enabled is True
+    app.extra_args = [str(tmp_path)]
+    app.parse_command_line([])
+
+
+def test_deprecated_props(jp_serverapp, tmp_path):
+    app: ServerApp = jp_serverapp
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        app.cookie_options = dict(foo=1)
+        app.get_secure_cookie_kwargs = dict(bar=1)
+        app.notebook_dir = str(tmp_path)
+        app.server_extensions = dict(foo=True)
+        app.kernel_ws_protocol = "foo"
+        app.limit_rate = True
+        app.iopub_msg_rate_limit = 10
+        app.iopub_data_rate_limit = 10
+        app.rate_limit_window = 10
+    with pytest.raises(SystemExit):
+        app.pylab = "foo"
+
+
+def test_signals(jp_serverapp):
+    app: ServerApp = jp_serverapp
+    app.answer_yes = True
+    app._restore_sigint_handler()
+    app._handle_sigint(None, None)
+    app._confirm_exit()
+    app._signal_info(None, None)
+
+
+async def test_shutdown_no_activity(jp_serverapp):
+    app: ServerApp = jp_serverapp
+    app.extension_manager.extensions = {}
+    app.exit = lambda _: None  # type:ignore
+    app.shutdown_no_activity()
+    app.shutdown_no_activity_timeout = 1
+    app.init_shutdown_no_activity()
+
+
+def test_running_server_info(jp_serverapp):
+    app: ServerApp = jp_serverapp
+    app.running_server_info(True)
+
+
+@pytest.mark.parametrize("should_exist", [True, False])
+def test_browser_open_files(jp_configurable_serverapp, should_exist, caplog):
+    app = jp_configurable_serverapp(no_browser_open_file=not should_exist)
+    assert os.path.exists(app.browser_open_file) == should_exist
+    url = urljoin("file:", pathname2url(app.browser_open_file))
+    url_messages = [rec.message for rec in caplog.records if url in rec.message]
+    assert url_messages if should_exist else not url_messages
